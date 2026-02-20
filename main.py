@@ -1,32 +1,57 @@
+import multiprocessing
 from nicegui import ui
 
-# 1. Можно добавить свой CSS файл или стили строкой
+# 1. Твои стили (оставляем как есть)
 ui.add_head_html('''
     <style>
+        body { background-color: #121212; }
         .my-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border-radius: 15px;
+            background: linear-gradient(135deg, #1e1e1e 0%, #2d2d2d 100%);
+            border: 1px solid #333;
+            border-radius: 20px;
             color: white;
-            padding: 20px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        .btn-glow {
+            background: #00d8ff !important; /* Цвет React */
+            color: black !important;
+            font-weight: bold;
+            transition: 0.3s;
         }
         .btn-glow:hover {
-            box-shadow: 0 0 20px #764ba2;
-            transform: scale(1.05);
-            transition: 0.2s;
+            box-shadow: 0 0 15px #00d8ff;
+            transform: translateY(-2px);
         }
     </style>
 ''')
 
-with ui.card().classes('my-card'):
-    ui.label('Привет с Raspberry Pi!').style('font-size: 24px; font-weight: bold;')
+# 2. Оборачиваем создание интерфейса в функцию (хорошая практика)
+def build_ui():
+    with ui.column().classes('w-full items-center q-pa-md'):
+        with ui.card().classes('my-card'):
+            ui.label('Moyka OS').style('font-size: 32px; font-family: sans-serif;')
+            ui.label('Интерфейс на Python + CSS').classes('text-grey-4')
+            
+            def on_click():
+                ui.notify('Сигнал отправлен!', color='info', icon='rocket')
+
+            ui.button('ЗАПУСТИТЬ', on_click=on_click) \
+                .classes('btn-glow q-mt-md') \
+                .props('rounded')
+
+# 3. КРИТИЧЕСКИ ВАЖНЫЙ БЛОК ДЛЯ RASPBERRY PI
+if __name__ in {"__main__", "__mp_main__"}:
+    # Отключаем лишние процессы, чтобы не было ошибки SemLock
+    multiprocessing.freeze_support()
     
-    def on_click():
-        ui.notify('Python выполнил задачу!', color='positive')
-
-    ui.button('Твоя кнопка из React', on_click=on_click) \
-        .classes('btn-glow') \
-        .props('flat color=white')
-
-# Запуск в режиме "родного окна" (использует упрощенный браузер)
-ui.run(native=True, window_size=(800, 480), title='Moyka App')
+    build_ui()
+    
+    ui.run(
+        native=True, 
+        window_size=(800, 480), 
+        title='Moyka App',
+        reload=False,     # Обязательно False на Pi Zero
+        dark=True,        # Включаем темную тему движка
+        show=False        # Не открывать браузер отдельно, только окно
+    )
