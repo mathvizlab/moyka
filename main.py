@@ -13,7 +13,7 @@ ui.add_head_html('''
         .btn-glow:hover {
             box-shadow: 0 0 20px #764ba2;
             transform: scale(1.05);
-            transition: 0.3s;
+            transition: 0.2s;
         }
     </style>
 ''')
