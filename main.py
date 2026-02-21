@@ -43,12 +43,10 @@ if __name__ in {"__main__", "__mp_main__"}:
     
     ui.run(
         native=True, 
-        window_size=(800, 480), 
+        fullscreen = True, 
         title='Moyka App',
         reload=False,     # Обязательно False на Pi Zero
         dark=True,        # Включаем темную тему движка
         show=False        # Не открывать браузер отдельно, только окно
     )
 
-#     sudo apt update
-# sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.0
