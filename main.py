@@ -48,6 +48,7 @@ btn1_div = ui.html('''
 <div id="btn1"
 style="
 padding:55px 35px;
+width:250px;
 border:4px solid rgba(255,255,255,0.1);
 border-radius:25px;
 background:rgba(30,58,138,0.3);
