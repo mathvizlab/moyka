@@ -11,16 +11,14 @@ body{
 }
 
 .active{
-    transform: scale(1.08);
-    filter: brightness(1.3);
-    border-color: rgb(6, 255, 165);
-    transform: translateY(-4px);
-    box-shadow: 0 5px 20px rgba(74, 144, 226, 0.4);
-    
+    transform: scale(1.08) translateY(-4px);
+    filter: brightness(1.3) drop-shadow(0 0 10px rgba(0, 255, 0, 0.6));
+    border: 4px solid rgb(0, 255, 0) !important;
+    box-shadow: 0 5px 20px rgba(0, 255, 0, 0.4);
 }
 
 .active svg path{
-    fill: rgb(6, 255, 165);
+    fill: rgb(0, 255, 0);
 }
 
 </style>
@@ -50,7 +48,7 @@ btn1_div = ui.html('''
 <div id="btn1"
 style="
 padding:55px 35px;
-border:2px solid rgba(255,255,255,0.1);
+border:4px solid rgba(255,255,255,0.1);
 border-radius:25px;
 background:rgba(30,58,138,0.3);
 color:white;
