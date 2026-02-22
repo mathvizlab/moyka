@@ -219,5 +219,11 @@ def main_page():
     
     update_ui()
     update_pause_visuals()
-
-ui.run(port=8080, show=False, title="Tesla Pro", reload=False)
+    
+ui.run(
+    fullscreen=True,   # полноэкранный режим
+    native=True,       # отдельное окно (не браузер)
+    show=True,
+    title="Tesla Pro",
+    reload=False
+)
