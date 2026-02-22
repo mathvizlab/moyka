@@ -9,7 +9,7 @@ except:
 
 gc.collect()
 
-# --- БЛОК ФУНКЦИЙ ДЛЯ КАЖДОЙ КНОПКИ ---
+# --- БЛОК ФУНКЦИЙ ДЛЯ КАЖДОЙ КНОПКИ 
 # Здесь прописывай логику для каждой кнопки отдельно
 def action_btn1(): print("FOAM (Пена) запущена")
 def action_btn2(): print("WAX (Воск) запущен")
@@ -219,7 +219,7 @@ def main_page():
     
     update_ui()
     update_pause_visuals()
-    
+
 ui.run(
     fullscreen=True,   # полноэкранный режим
     native=True,       # отдельное окно (не браузер)
