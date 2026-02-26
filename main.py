@@ -162,7 +162,7 @@ def main_page():
     .scale-active { transform: scale(1.1); z-index: 10; }
     .side-menu { position: fixed; top: 0; left: -280px; width: 280px; height: 100vh; background: #080c14; border-right: 2px solid var(--primary); z-index: 2000; transition: 0.4s; display: flex; flex-direction: column; padding: 40px 20px; }
     .menu-visible { left: 0 !important; }
-    .drawer-handle { position: absolute; top: 20px; right: -55px; width: 55px; height: 55px; background: #080c14; border: 2px solid var(--primary); border-left: none; border-radius: 0 12px 12px 0; color: var(--primary); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+    .drawer-handle { display: none !important; }
     .custom-display { position: fixed; top: 20px; right: 0; z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-radius: 25px 0 0 25px; padding: 15px 35px; display: flex; flex-direction: column; align-items: flex-end; }
     .main-val { color: #00f2ff; font-size: 5.5vmin; font-weight: 900; line-height: 1; }
     .main-unit { font-size: 1.8vmin; color: var(--primary); }
@@ -174,18 +174,28 @@ def main_page():
     .pause-stopped { border: 2.5px solid #2ecc71 !important; color: #2ecc71 !important; }
     .pause-active { border: 2.5px solid #ff4757 !important; color: #ff4757 !important; }
     </style>
+    <script>
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'q' || e.key === 'Q') {
+            e.preventDefault();
+            const menu = document.querySelector('.side-menu');
+            if (menu) {
+                menu.classList.toggle('menu-visible');
+            }
+        }
+    });
+    </script>
     """)
 
     # --- МЕНЮ ---
     with ui.element('div').classes('side-menu') as left_panel:
-        with ui.element('div').classes('drawer-handle').on('click', toggle_menu):
-            ui.icon('menu', size='30px')
         ui.label('TESLA WASH').classes('text-yellow-500 font-bold mb-8').style('font-size: 16px; letter-spacing: 4px')
         for icon, label in [('language', 'LANG'), ('qr_code_2', 'QR'), ('payments', 'CASH'), ('info', 'INFO')]:
             with ui.button().props('flat no-caps').classes('w-full mb-2'):
                 with ui.row().classes('items-center w-full'):
                     ui.icon(icon, color='yellow-500', size='24px').classes('mr-4')
                     ui.label(label).classes('text-white text-sm font-bold')
+    
 
     # --- ДИСПЛЕЙ ---
     with ui.element('div').classes('custom-display cursor-pointer').on('click', lambda: (display_mode.__setitem__(0, 1 if display_mode[0] == 0 else 0), update_ui())):
