@@ -1,5 +1,6 @@
 import gc
 import asyncio
+import json
 from nicegui import ui
 
 try:
@@ -66,11 +67,11 @@ btns, pause_refs = {}, {}
 def init_service_config():
     default_config = {}
     for bid, name in SERVICE_NAMES.items():
+        price_per_min = 500
         default_config[bid] = {
             "name": name,
-            "price_amount": 500,
-            "duration_seconds": 60,
-            "price_per_second": 500 / 60
+            "price_per_min": price_per_min,
+            "price_per_second": price_per_min / 60,
         }
     return default_config
 
@@ -90,18 +91,16 @@ def get_current_price_per_second():
 def update_ui():
     if 'main_display' not in globals(): return
     rate = get_current_price_per_second()
-    sec = int(balance[0] / rate) if rate > 0 else 0
+    total_seconds = int(balance[0] / rate) if rate > 0 else 0
+    minutes = total_seconds // 60
+    seconds = total_seconds % 60
+    time_str = f"{minutes:02d}:{seconds:02d}"
     money = int(balance[0])
     formatted_money = f"{money:,}".replace(",", " ")
-    
-    if display_mode[0] == 0:
-        main_display.set_text(f"{sec}")
-        main_unit.set_text("SEC")
-        sub_display.set_text(f"{formatted_money} {currency_code[0]}")
-    else:
-        main_display.set_text(f"{formatted_money}")
-        main_unit.set_text(currency_code[0])
-        sub_display.set_text(f"{sec} SECONDS")
+
+    main_display.set_text(time_str)
+    main_unit.set_text("TIME")
+    sub_display.set_text(f"{formatted_money} {currency_code[0]}")
 
 async def timer_loop():
     while True:
@@ -114,6 +113,7 @@ async def timer_loop():
                     balance[0] = 0
                     stop_everything()
                 update_ui()
+                save_app_state()
         await asyncio.sleep(1)
 
 def stop_everything():
@@ -133,6 +133,12 @@ def handle_click(bid):
         action()
     
     active_btn_id[0] = bid
+    # temporary fixed session: 30 minutes per activation
+    price_per_sec = get_current_price_per_second()
+    if price_per_sec > 0:
+        balance[0] = 30 * 60 * price_per_sec
+    else:
+        balance[0] = 0
     refresh_button_visuals()
     update_ui()
 
@@ -171,16 +177,68 @@ def toggle_menu():
     menu_open[0] = not menu_open[0]
     left_panel.classes(add='menu-visible' if menu_open[0] else '', remove='menu-visible' if not menu_open[0] else '')
 
-def update_service_config(bid, price_amount, duration_seconds):
+def update_service_config(bid, price_per_min):
     if bid not in service_config:
         return
-    service_config[bid]["price_amount"] = price_amount
-    service_config[bid]["duration_seconds"] = duration_seconds
-    service_config[bid]["price_per_second"] = price_amount / duration_seconds if duration_seconds > 0 else 0
+    service_config[bid]["price_per_min"] = price_per_min
+    service_config[bid]["price_per_second"] = price_per_min / 60 if price_per_min > 0 else 0
     update_ui()
 
 def format_money(amount):
     return f"{int(amount):,}".replace(",", " ")
+
+LOCAL_STORAGE_KEY = "tesla_wash_state"
+
+def build_app_state():
+    return {
+        "prices_per_min": {
+            bid: config["price_per_min"]
+            for bid, config in service_config.items()
+        },
+        "revenues": {
+            bid: revenue for bid, revenue in service_revenue.items()
+        },
+    }
+
+def save_app_state():
+    state = build_app_state()
+    state_json = json.dumps(state)
+    # store JSON string safely in localStorage
+    ui.run_javascript(
+        f'localStorage.setItem("{LOCAL_STORAGE_KEY}", {json.dumps(state_json)});'
+    )
+
+def _apply_loaded_state(state_json: str):
+    if not state_json:
+        return
+    try:
+        data = json.loads(state_json)
+    except Exception:
+        return
+
+    prices = data.get("prices_per_min", {})
+    for bid, val in prices.items():
+        if bid in service_config:
+            try:
+                ppm = float(val)
+            except Exception:
+                continue
+            service_config[bid]["price_per_min"] = ppm
+            service_config[bid]["price_per_second"] = ppm / 60 if ppm > 0 else 0
+
+    revenues = data.get("revenues", {})
+    for bid, val in revenues.items():
+        if bid in service_revenue:
+            try:
+                service_revenue[bid] = float(val)
+            except Exception:
+                continue
+
+def load_app_state():
+    # NiceGUI version in this project does not support result callbacks from run_javascript,
+    # so we safely skip loading here to avoid runtime errors.
+    # App will start with default prices and revenues.
+    pass
 
 tab_contents = {}
 
@@ -195,6 +253,8 @@ def main_page():
     btns.clear(); pause_refs.clear()
     tab_contents.clear()
     
+    load_app_state()
+
     ui.timer(0, timer_loop, once=True)
 
     ui.add_head_html("""
@@ -243,29 +303,29 @@ def main_page():
         
         # Tab buttons
         with ui.column().classes('w-full'):
-            lang_btn = ui.button('LANG').props('flat no-caps').classes('w-full mb-2 justify-start')
+            lang_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start')
             with lang_btn:
                 with ui.row().classes('items-center w-full'):
                     ui.icon('language', color='yellow-500', size='24px').classes('mr-4')
-                    ui.label('LANG').classes('text-white text-sm font-bold')
+                    ui.label('Language').classes('text-white text-sm font-bold')
             
-            qr_btn = ui.button('QR').props('flat no-caps').classes('w-full mb-2 justify-start')
+            qr_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start')
             with qr_btn:
                 with ui.row().classes('items-center w-full'):
                     ui.icon('qr_code_2', color='yellow-500', size='24px').classes('mr-4')
                     ui.label('QR').classes('text-white text-sm font-bold')
             
-            cash_btn = ui.button('CASH').props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('cash'))
+            cash_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('cash'))
             with cash_btn:
                 with ui.row().classes('items-center w-full'):
                     ui.icon('payments', color='yellow-500', size='24px').classes('mr-4')
-                    ui.label('CASH').classes('text-white text-sm font-bold')
+                    ui.label('Cash').classes('text-white text-sm font-bold')
             
-            info_btn = ui.button('INFO').props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('info'))
+            info_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('info'))
             with info_btn:
                 with ui.row().classes('items-center w-full'):
                     ui.icon('info', color='yellow-500', size='24px').classes('mr-4')
-                    ui.label('INFO').classes('text-white text-sm font-bold')
+                    ui.label('Info').classes('text-white text-sm font-bold')
         
         # Tab content containers
         with ui.column().classes('w-full mt-4').style('max-height: calc(100vh - 200px); overflow-y: auto;') as tab_container:
@@ -305,8 +365,6 @@ def main_page():
                 ui.label('PRICE CONFIGURATION').classes('text-yellow-500 font-bold mb-4 text-center').style('font-size: 14px')
                 
                 price_inputs = {}
-                duration_inputs = {}
-                price_per_sec_labels = {}
                 
                 for bid in SERVICE_NAMES.keys():
                     name = SERVICE_NAMES[bid]
@@ -314,34 +372,22 @@ def main_page():
                     
                     with ui.card().classes('w-full mb-3').style('background: #1e293b;'):
                         ui.label(name).classes('text-yellow-500 font-bold mb-2')
-                        
-                        with ui.row().classes('w-full items-center mb-2'):
-                            ui.label('Price (UZS):').classes('text-white text-sm mr-2').style('min-width: 100px;')
-                            price_input = ui.number(label='', value=config["price_amount"], format='%.0f', precision=0).classes('flex-1')
-                            price_inputs[bid] = price_input
-                        
-                        with ui.row().classes('w-full items-center mb-2'):
-                            ui.label('Duration (sec):').classes('text-white text-sm mr-2').style('min-width: 100px;')
-                            duration_input = ui.number(label='', value=config["duration_seconds"], format='%.0f', precision=0).classes('flex-1')
-                            duration_inputs[bid] = duration_input
-                        
-                        with ui.row().classes('w-full items-center mb-2'):
-                            ui.label('Per second:').classes('text-white text-sm mr-2').style('min-width: 100px;')
-                            price_per_sec_label = ui.label(f"{config['price_per_second']:.3f} UZS").classes('text-yellow-500 font-bold')
-                            price_per_sec_labels[bid] = price_per_sec_label
+
+                        ui.label('Price / minute (UZS):').classes('text-white text-sm mb-1')
+                        price_input = ui.number(label='', value=config["price_per_min"], format='%.0f', precision=0).classes('w-full text-white')
+                        price_inputs[bid] = price_input
                         
                         def make_save_handler(bid):
                             def save():
                                 try:
-                                    price = int(price_inputs[bid].value)
-                                    duration = int(duration_inputs[bid].value)
-                                    if price <= 0 or duration <= 0:
-                                        ui.notify("Price and duration must be positive", color='red')
+                                    price_per_min = int(price_inputs[bid].value)
+                                    if price_per_min <= 0:
+                                        ui.notify("Price must be positive", color='red')
                                         return
-                                    update_service_config(bid, price, duration)
-                                    price_per_sec_labels[bid].set_text(f"{service_config[bid]['price_per_second']:.3f} UZS")
+                                    update_service_config(bid, price_per_min)
+                                    save_app_state()
                                     ui.notify(f"{SERVICE_NAMES[bid]} configuration saved", color='green')
-                                except:
+                                except Exception:
                                     ui.notify("Invalid input", color='red')
                             return save
                         
@@ -373,7 +419,10 @@ def main_page():
                         pause_refs['svg'] = ui.html('')
                         pause_refs['label'] = ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
                     else:
-                        path = SVG_PATHS.get(bid, "")
+                        path = SVG_PATHS.get(bid)
+                        if not path:
+                            # fallback minimal icon (circle)
+                            path = "M500 200a300 300 0 1 0 0.001 0z"
                         ui.html(f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>')
                         ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
                 btns[bid] = btn
