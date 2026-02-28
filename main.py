@@ -56,10 +56,11 @@ SERVICE_NAMES = {
 balance = [5000000.0]
 active_btn_id = [None]
 is_paused = [True]  
-display_mode = [0] 
+display_mode = [0]  # 0 = TIME big, 1 = MONEY big
 currency_code = ["UZS"]
 menu_open = [False]
 current_tab = [None]
+price_popup_timer = [None]
 
 btns, pause_refs = {}, {}
 
@@ -88,6 +89,16 @@ def get_current_price_per_second():
         return 0
     return service_config[active_btn_id[0]]["price_per_second"]
 
+price_popup_bar_ref = [None]
+
+def show_price_popup_bar(service_name, price_per_min):
+    if not price_popup_bar_ref[0]: return
+    price_popup_bar_ref[0].set_text(f"{service_name} — {price_per_min} UZS / MIN")
+    price_popup_bar_ref[0].style('display: block !important;')
+    if price_popup_timer[0]:
+        price_popup_timer[0].cancel()
+    price_popup_timer[0] = ui.timer(3.0, lambda: price_popup_bar_ref[0].style('display: none !important;'), once=True)
+
 def update_ui():
     if 'main_display' not in globals(): return
     rate = get_current_price_per_second()
@@ -98,9 +109,14 @@ def update_ui():
     money = int(balance[0])
     formatted_money = f"{money:,}".replace(",", " ")
 
-    main_display.set_text(time_str)
-    main_unit.set_text("TIME")
-    sub_display.set_text(f"{formatted_money} {currency_code[0]}")
+    if display_mode[0] == 0:
+        main_display.set_text(time_str)
+        main_unit.set_text("TIME")
+        sub_display.set_text(f"{formatted_money} {currency_code[0]}")
+    else:
+        main_display.set_text(formatted_money)
+        main_unit.set_text(currency_code[0])
+        sub_display.set_text(time_str)
 
 async def timer_loop():
     while True:
@@ -140,6 +156,13 @@ def handle_click(bid):
     else:
         balance[0] = 0
     refresh_button_visuals()
+    
+    # Show price popup bar at top
+    if active_btn_id[0] and active_btn_id[0] in service_config:
+        service_name = SERVICE_NAMES.get(active_btn_id[0], "")
+        price_per_min = service_config[active_btn_id[0]]["price_per_min"]
+        show_price_popup_bar(service_name, price_per_min)
+    
     update_ui()
 
 def refresh_button_visuals():
@@ -167,11 +190,11 @@ def update_pause_visuals():
     if is_paused[0]:
         p_btn.classes(remove='pause-active scale-active', add='pause-stopped')
         pause_refs['label'].set_text('START')
-        pause_refs['svg'].content = f'<svg width="5.5vmin" height="5.5vmin" viewBox="0 0 1000 1000" style="fill:#2ecc71; transition: 0.3s;"><path d="{PATH_PLAY}"/></svg>'
+        pause_refs['svg'].content = f'<svg width="5.5vmin" height="5.5vmin" viewBox="0 0 1000 1000" style="fill:#2ecc71;"><path d="{PATH_PLAY}"/></svg>'
     else:
         p_btn.classes(remove='pause-stopped', add='pause-active scale-active')
         pause_refs['label'].set_text('STOP')
-        pause_refs['svg'].content = f'<svg width="5.5vmin" height="5.5vmin" viewBox="0 0 1000 1000" style="fill:#ff4757; transition: 0.3s;"><path d="{PATH_PAUSE}"/></svg>'
+        pause_refs['svg'].content = f'<svg width="5.5vmin" height="5.5vmin" viewBox="0 0 1000 1000" style="fill:#ff4757;"><path d="{PATH_PAUSE}"/></svg>'
 
 def toggle_menu():
     menu_open[0] = not menu_open[0]
@@ -249,32 +272,36 @@ def show_tab(tab_name):
 
 @ui.page('/')
 def main_page():
-    global main_display, main_unit, sub_display, left_panel, tab_contents
+    global main_display, main_unit, sub_display, left_panel, tab_contents, price_popup_bar
     btns.clear(); pause_refs.clear()
     tab_contents.clear()
     
     load_app_state()
 
     ui.timer(0, timer_loop, once=True)
+    
+    # Price popup bar at top
+    price_popup_bar_ref[0] = ui.label('').classes('price-popup-bar').style('display: none;')
 
     ui.add_head_html("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&display=swap');
     :root { --primary: #ffcc00; --bg: #020617; --btn-size: clamp(75px, 13vmin, 130px); }
     body { background: var(--bg); margin: 0; font-family: 'Orbitron', sans-serif; overflow: hidden; color: white; }
-    .action-btn svg { fill: #64748b; transition: 0.2s; }
+    .action-btn svg { fill: #64748b; }
     .icon-active svg { fill: var(--primary) !important; }
     .scale-active { transform: scale(1.1); z-index: 10; }
-    .side-menu { position: fixed; top: 0; left: -280px; width: 280px; height: 100vh; background: #080c14; border-right: 2px solid var(--primary); z-index: 2000; transition: 0.4s; display: flex; flex-direction: column; padding: 40px 20px; }
+    .side-menu { position: fixed; top: 0; left: -280px; width: 280px; height: 100vh; background: #080c14; border-right: 2px solid var(--primary); z-index: 2000; display: flex; flex-direction: column; padding: 40px 20px; }
     .menu-visible { left: 0 !important; }
     .drawer-handle { display: none !important; }
+    .price-popup-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3000; background: var(--primary); color: var(--bg); padding: 12px 30px; font-size: 2.2vmin; font-weight: 900; border-radius: 0 0 10px 10px; text-align: center; white-space: nowrap; }
     .custom-display { position: fixed; top: 20px; right: 0; z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-radius: 25px 0 0 25px; padding: 15px 35px; display: flex; flex-direction: column; align-items: flex-end; }
     .main-val { color: #00f2ff; font-size: 5.5vmin; font-weight: 900; line-height: 1; }
     .main-unit { font-size: 1.8vmin; color: var(--primary); }
     .sub-info { color: #94a3b8; font-size: 2vmin; margin-top: 4px; }
     .screen-center { position: absolute; top: 52%; left: 50%; transform: translate(-50%, -40%); width: 95%; display: flex; justify-content: center; }
     .buttons-grid { display: grid; grid-template-columns: repeat(5, var(--btn-size)); gap: 2.5vmin; } 
-    .action-btn { width: var(--btn-size); height: var(--btn-size); border-radius: 18%; background: #1e293b; border: 1px solid rgba(255, 255, 255, 0.1); color: #64748b; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; transition: 0.2s; }
+    .action-btn { width: var(--btn-size); height: var(--btn-size); border-radius: 18%; background: #1e293b; border: 1px solid rgba(255, 255, 255, 0.1); color: #64748b; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; }
     .active-yellow { border: 2.5px solid var(--primary) !important; color: white !important; }
     .pause-stopped { border: 2.5px solid #2ecc71 !important; color: #2ecc71 !important; }
     .pause-active { border: 2.5px solid #ff4757 !important; color: #ff4757 !important; }
@@ -282,6 +309,8 @@ def main_page():
     .tab-content::-webkit-scrollbar { width: 6px; }
     .tab-content::-webkit-scrollbar-track { background: #0f172a; }
     .tab-content::-webkit-scrollbar-thumb { background: var(--primary); border-radius: 3px; }
+    * { transition: none !important; }
+    *:hover { transition: none !important; }
     </style>
     <script>
     document.addEventListener('keydown', function(e) {
@@ -395,7 +424,11 @@ def main_page():
     
 
     # --- ДИСПЛЕЙ ---
-    with ui.element('div').classes('custom-display cursor-pointer').on('click', lambda: (display_mode.__setitem__(0, 1 if display_mode[0] == 0 else 0), update_ui())):
+    def swap_display():
+        display_mode[0] = 1 if display_mode[0] == 0 else 0
+        update_ui()
+    
+    with ui.element('div').classes('custom-display cursor-pointer').on('click', swap_display):
         with ui.row().classes('items-baseline'):
             global main_display, main_unit, sub_display
             main_display = ui.label('').classes('main-val')
