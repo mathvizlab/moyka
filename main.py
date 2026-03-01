@@ -1,14 +1,22 @@
 import gc
 import asyncio
 import json
+import time
+from datetime import datetime
 from nicegui import ui
 
 try:
     from icons import SVG_PATHS
-except:
+except Exception:
     SVG_PATHS = {f"btn{i}": "M500 100l100 800h-200z" for i in range(1, 16)}
 
+# Configurable video source (static file or URL)
+VIDEO_SRC = "/static/promo.mp4"
+
 gc.collect()
+
+def get_svg_path(bid):
+    return SVG_PATHS.get(bid) or "M500 200a300 300 0 1 0 0.001 0z"
 
 # --- БЛОК ФУНКЦИЙ ДЛЯ КАЖДОЙ КНОПК
 # Здесь прописывай логику для каждой кнопк отдельно
@@ -60,9 +68,58 @@ display_mode = [0]  # 0 = TIME big, 1 = MONEY big
 currency_code = ["UZS"]
 menu_open = [False]
 current_tab = [None]
-price_popup_timer = [None]
-
 btns, pause_refs = {}, {}
+
+# Notifications: list of {"ts": float, "text": str}
+notifications = []
+notifications_container_ref = [None]
+notifications_panel_visible = [False]
+
+def notify(text):
+    notifications.append({"ts": time.time(), "text": str(text)})
+    _refresh_notifications_ui()
+
+def _refresh_notifications_ui():
+    if not notifications_container_ref[0]:
+        return
+    container = notifications_container_ref[0]
+    container.clear()
+    with container:
+        for entry in reversed(notifications[-50:]):
+            ts = entry["ts"]
+            dt = datetime.fromtimestamp(ts)
+            tstr = dt.strftime("%H:%M:%S")
+            with ui.row().classes("w-full items-center gap-2 py-1 text-sm"):
+                ui.label(tstr).classes("text-gray-400 shrink-0")
+                ui.label(entry["text"]).classes("text-white truncate")
+
+def clear_notifications():
+    notifications.clear()
+    _refresh_notifications_ui()
+
+def close_notifications_panel():
+    notifications_panel_visible[0] = False
+    if notifications_panel_ref[0]:
+        notifications_panel_ref[0].set_visibility(False)
+    if notifications_overlay_ref[0]:
+        notifications_overlay_ref[0].set_visibility(False)
+
+def toggle_notifications_panel():
+    if not notifications_panel_ref[0]:
+        return
+    if notifications_panel_visible[0]:
+        close_notifications_panel()
+        return
+    notifications_panel_visible[0] = True
+    notifications_panel_ref[0].set_visibility(True)
+    if notifications_overlay_ref[0]:
+        notifications_overlay_ref[0].set_visibility(True)
+
+notifications_panel_ref = [None]
+notifications_overlay_ref = [None]
+price_bar_ref = [None]
+price_bar_icon_ref = [None]
+price_bar_label_ref = [None]
 
 # --- SERVICE CONFIGURATION ---
 def init_service_config():
@@ -89,15 +146,22 @@ def get_current_price_per_second():
         return 0
     return service_config[active_btn_id[0]]["price_per_second"]
 
-price_popup_bar_ref = [None]
-
-def show_price_popup_bar(service_name, price_per_min):
-    if not price_popup_bar_ref[0]: return
-    price_popup_bar_ref[0].set_text(f"{service_name} — {price_per_min} UZS / MIN")
-    price_popup_bar_ref[0].style('display: block !important;')
-    if price_popup_timer[0]:
-        price_popup_timer[0].cancel()
-    price_popup_timer[0] = ui.timer(3.0, lambda: price_popup_bar_ref[0].style('display: none !important;'), once=True)
+def update_price_bar():
+    bar, icon_el, label_el = price_bar_ref[0], price_bar_icon_ref[0], price_bar_label_ref[0]
+    if not bar or not label_el:
+        return
+    bid = active_btn_id[0]
+    if not bid or bid not in service_config:
+        bar.classes(remove="price-bar-visible", add="price-bar-hidden")
+        return
+    bar.classes(remove="price-bar-hidden", add="price-bar-visible")
+    name = SERVICE_NAMES.get(bid, "")
+    price = service_config[bid]["price_per_min"]
+    path = get_svg_path(bid)
+    svg = f'<svg width="28" height="28" viewBox="0 0 1000 1000" style="fill:#020617; display:block;"><path d="{path}"/></svg>'
+    if icon_el:
+        icon_el.content = svg
+    label_el.set_text(f"{name} — {price} UZS / MIN")
 
 def update_ui():
     if 'main_display' not in globals(): return
@@ -135,7 +199,9 @@ async def timer_loop():
 def stop_everything():
     is_paused[0] = True
     active_btn_id[0] = None
+    notify("Balance reached 0 — session stopped")
     refresh_button_visuals()
+    update_price_bar()
     update_ui()
     update_pause_visuals()
 
@@ -149,20 +215,15 @@ def handle_click(bid):
         action()
     
     active_btn_id[0] = bid
-    # temporary fixed session: 30 minutes per activation
     price_per_sec = get_current_price_per_second()
     if price_per_sec > 0:
         balance[0] = 30 * 60 * price_per_sec
     else:
         balance[0] = 0
     refresh_button_visuals()
-    
-    # Show price popup bar at top
-    if active_btn_id[0] and active_btn_id[0] in service_config:
-        service_name = SERVICE_NAMES.get(active_btn_id[0], "")
-        price_per_min = service_config[active_btn_id[0]]["price_per_min"]
-        show_price_popup_bar(service_name, price_per_min)
-    
+    service_name = SERVICE_NAMES.get(bid, "")
+    notify(f"Selected {service_name}")
+    update_price_bar()
     update_ui()
 
 def refresh_button_visuals():
@@ -177,10 +238,11 @@ def refresh_button_visuals():
             el.classes(add='icon-idle', remove='icon-active')
 
 def toggle_pause():
-    if not active_btn_id[0]: 
+    if not active_btn_id[0]:
         ui.notify("CHOOSE MODE", color='orange')
         return
     is_paused[0] = not is_paused[0]
+    notify("Started" if not is_paused[0] else "Stopped")
     update_pause_visuals()
 
 def update_pause_visuals():
@@ -205,6 +267,8 @@ def update_service_config(bid, price_per_min):
         return
     service_config[bid]["price_per_min"] = price_per_min
     service_config[bid]["price_per_second"] = price_per_min / 60 if price_per_min > 0 else 0
+    notify(f"Price changed: {SERVICE_NAMES.get(bid, '')} — {price_per_min} UZS/min")
+    update_price_bar()
     update_ui()
 
 def format_money(amount):
@@ -272,16 +336,13 @@ def show_tab(tab_name):
 
 @ui.page('/')
 def main_page():
-    global main_display, main_unit, sub_display, left_panel, tab_contents, price_popup_bar
-    btns.clear(); pause_refs.clear()
+    global main_display, main_unit, sub_display, left_panel, tab_contents
+    btns.clear()
+    pause_refs.clear()
     tab_contents.clear()
-    
     load_app_state()
 
     ui.timer(0, timer_loop, once=True)
-    
-    # Price popup bar at top
-    price_popup_bar_ref[0] = ui.label('').classes('price-popup-bar').style('display: none;')
 
     ui.add_head_html("""
     <style>
@@ -294,12 +355,17 @@ def main_page():
     .side-menu { position: fixed; top: 0; left: -280px; width: 280px; height: 100vh; background: #080c14; border-right: 2px solid var(--primary); z-index: 2000; display: flex; flex-direction: column; padding: 40px 20px; }
     .menu-visible { left: 0 !important; }
     .drawer-handle { display: none !important; }
-    .price-popup-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3000; background: var(--primary); color: var(--bg); padding: 12px 30px; font-size: 2.2vmin; font-weight: 900; border-radius: 0 0 10px 10px; text-align: center; white-space: nowrap; }
-    .custom-display { position: fixed; top: 20px; right: 0; z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-radius: 25px 0 0 25px; padding: 15px 35px; display: flex; flex-direction: column; align-items: flex-end; }
-    .main-val { color: #00f2ff; font-size: 5.5vmin; font-weight: 900; line-height: 1; }
-    .main-unit { font-size: 1.8vmin; color: var(--primary); }
-    .sub-info { color: #94a3b8; font-size: 2vmin; margin-top: 4px; }
-    .screen-center { position: absolute; top: 52%; left: 50%; transform: translate(-50%, -40%); width: 95%; display: flex; justify-content: center; }
+    .price-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3000; background: var(--primary); color: var(--bg); padding: 10px 24px; font-size: 2vmin; font-weight: 900; border-radius: 0 0 10px 10px; display: flex; align-items: center; gap: 10px; }
+    .price-bar-icon-wrap { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .price-bar-hidden { visibility: hidden; opacity: 0; pointer-events: none; }
+    .price-bar-visible { visibility: visible; opacity: 1; }
+    .custom-display { position: fixed; top: 20px; right: 0; z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-radius: 25px 0 0 25px; padding: 18px 40px; display: flex; flex-direction: column; align-items: flex-end; }
+    .main-val { color: #00f2ff; font-size: 6.2vmin; font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; }
+    .main-unit { font-size: 2vmin; color: var(--primary); margin-left: 6px; }
+    .sub-info { color: #94a3b8; font-size: 2.2vmin; margin-top: 6px; }
+    .screen-center { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 95%; display: flex; justify-content: center; padding-bottom: 22vh; }
+    .video-bottom { position: fixed; bottom: 0; left: 0; width: 100%; height: 18vh; z-index: 50; object-fit: cover; background: #000; }
+    .notif-panel { position: fixed; top: 56px; right: 12px; z-index: 2500; width: 320px; max-height: 60vh; overflow-y: auto; background: #0f172a; border: 2px solid var(--primary); border-radius: 12px; padding: 12px; }
     .buttons-grid { display: grid; grid-template-columns: repeat(5, var(--btn-size)); gap: 2.5vmin; } 
     .action-btn { width: var(--btn-size); height: var(--btn-size); border-radius: 18%; background: #1e293b; border: 1px solid rgba(255, 255, 255, 0.1); color: #64748b; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; }
     .active-yellow { border: 2.5px solid var(--primary) !important; color: white !important; }
@@ -423,14 +489,35 @@ def main_page():
                         ui.button('SAVE', on_click=make_save_handler(bid)).classes('w-full mt-2').props('color=primary')
     
 
-    # --- ДИСПЛЕЙ ---
+    # --- Bell (notifications) top-right ---
+    with ui.element('div').classes('fixed top-5 right-4 z-[110]'):
+        ui.button(icon='notifications').props('flat round').classes('text-yellow-500').on('click', toggle_notifications_panel)
+    with ui.element('div').classes('fixed inset-0 z-[2400]').style('background: transparent;').on('click', close_notifications_panel) as overlay:
+        notifications_overlay_ref[0] = overlay
+        overlay.set_visibility(False)
+    with ui.column().classes('notif-panel') as notif_panel:
+        notifications_panel_ref[0] = notif_panel
+        notif_panel.set_visibility(False)
+        ui.label('Notifications').classes('text-yellow-500 font-bold mb-2')
+        with ui.column().classes('w-full gap-0') as notif_container:
+            notifications_container_ref[0] = notif_container
+            _refresh_notifications_ui()
+        ui.button('Clear', on_click=clear_notifications).classes('w-full mt-2').props('flat color=primary')
+
+    # --- Price bar (always visible when service selected) ---
+    with ui.row().classes('price-bar price-bar-hidden').style('align-items: center;') as price_bar:
+        price_bar_ref[0] = price_bar
+        with ui.element('div').classes('price-bar-icon-wrap'):
+            price_bar_icon_ref[0] = ui.html('')
+        price_bar_label_ref[0] = ui.label('').classes('font-bold')
+
+    # --- Timer display ---
     def swap_display():
         display_mode[0] = 1 if display_mode[0] == 0 else 0
         update_ui()
-    
+
     with ui.element('div').classes('custom-display cursor-pointer').on('click', swap_display):
         with ui.row().classes('items-baseline'):
-            global main_display, main_unit, sub_display
             main_display = ui.label('').classes('main-val')
             main_unit = ui.label('').classes('main-unit ml-2')
         sub_display = ui.label('').classes('sub-info')
@@ -459,8 +546,15 @@ def main_page():
                         ui.html(f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>')
                         ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
                 btns[bid] = btn
-    
+
+    # --- Bottom video player ---
+    ui.html(
+        f'<video class="video-bottom" autoplay muted loop playsinline controls src="{VIDEO_SRC}">'
+        'Your browser does not support the video tag.</video>'
+    )
+
     update_ui()
+    update_price_bar()
     update_pause_visuals()
 
 ui.run(
