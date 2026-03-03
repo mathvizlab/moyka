@@ -17,7 +17,7 @@ gc.collect()
 
 def get_svg_path(bid):
     return SVG_PATHS.get(bid) or "M500 200a300 300 0 1 0 0.001 0z"
-
+# s
 # --- БЛОК ФУНКЦИЙ ДЛЯ КАЖДОЙ КНОПК
 # Здесь прописывай логику для каждой кнопк отдельно
 def action_btn1(): print("FOAM (Пена) запущена")
