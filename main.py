@@ -61,14 +61,30 @@ SERVICE_NAMES = {
 }
 
 # --- СИСТЕМНАЯ ЛОГИКА ---
-balance = [5000000.0]
+DEFAULT_SESSION_SECONDS = 30 * 60
+remaining_seconds = [0]  # source of truth for time; 0 = no session
 active_btn_id = [None]
-is_paused = [True]  
+is_paused = [True]
 display_mode = [0]  # 0 = TIME big, 1 = MONEY big
 currency_code = ["UZS"]
 menu_open = [False]
 current_tab = [None]
 btns, pause_refs = {}, {}
+
+def start_session_if_needed():
+    if remaining_seconds[0] <= 0:
+        remaining_seconds[0] = DEFAULT_SESSION_SECONDS
+
+def switch_service(bid):
+    active_btn_id[0] = bid
+    refresh_button_visuals()
+    service_name = SERVICE_NAMES.get(bid, "")
+    notify(f"Selected {service_name}")
+    update_price_bar()
+
+def set_running(running: bool):
+    is_paused[0] = not running
+    update_pause_visuals()
 
 # Notifications: list of {"ts": float, "text": str}
 notifications = []
@@ -175,12 +191,12 @@ def update_price_bar():
 
 def update_ui():
     if 'main_display' not in globals(): return
-    rate = get_current_price_per_second()
-    total_seconds = int(balance[0] / rate) if rate > 0 else 0
-    minutes = total_seconds // 60
-    seconds = total_seconds % 60
+    sec = max(0, remaining_seconds[0])
+    minutes = sec // 60
+    seconds = sec % 60
     time_str = f"{minutes:02d}:{seconds:02d}"
-    money = int(balance[0])
+    rate = get_current_price_per_second()
+    money = int(sec * rate) if rate > 0 else 0
     formatted_money = f"{money:,}".replace(",", " ")
 
     if display_mode[0] == 0:
@@ -194,13 +210,12 @@ def update_ui():
 
 async def timer_loop():
     while True:
-        if not is_paused[0] and active_btn_id[0] and balance[0] > 0:
+        if not is_paused[0] and active_btn_id[0] and remaining_seconds[0] > 0:
             price_per_sec = get_current_price_per_second()
             if price_per_sec > 0:
-                balance[0] -= price_per_sec
+                remaining_seconds[0] -= 1
                 service_revenue[active_btn_id[0]] += price_per_sec
-                if balance[0] <= 0: 
-                    balance[0] = 0
+                if remaining_seconds[0] <= 0:
                     stop_everything()
                 update_ui()
                 save_app_state()
@@ -209,31 +224,28 @@ async def timer_loop():
 def stop_everything():
     is_paused[0] = True
     active_btn_id[0] = None
-    notify("Balance reached 0 — session stopped")
+    remaining_seconds[0] = 0
+    notify("Session ended — time reached 0")
     refresh_button_visuals()
     update_price_bar()
     update_ui()
     update_pause_visuals()
 
 def handle_click(bid):
-    if bid == 'btn_pause': 
+    if bid == 'btn_pause':
         toggle_pause()
         return
-    
+
     action = BUTTON_ACTIONS.get(bid)
     if action:
         action()
-    
-    active_btn_id[0] = bid
-    price_per_sec = get_current_price_per_second()
-    if price_per_sec > 0:
-        balance[0] = 30 * 60 * price_per_sec
-    else:
-        balance[0] = 0
-    refresh_button_visuals()
-    service_name = SERVICE_NAMES.get(bid, "")
-    notify(f"Selected {service_name}")
-    update_price_bar()
+
+    if bid not in service_config:
+        return
+    start_session_if_needed()
+    switch_service(bid)
+    if is_paused[0]:
+        set_running(True)
     update_ui()
 
 def refresh_button_visuals():
@@ -357,7 +369,7 @@ def main_page():
     ui.add_head_html("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&display=swap');
-    :root { --primary: #ffcc00; --bg: #020617; --btn-size: clamp(75px, 13vmin, 130px); }
+    :root { --primary: #ffcc00; --bg: #020617; --btn-size: clamp(60px, 12vmin, 130px); }
     body { background: var(--bg); margin: 0; font-family: 'Orbitron', sans-serif; overflow: hidden; color: white; }
     .action-btn svg { fill: #64748b; }
     .icon-active svg { fill: var(--primary) !important; }
@@ -365,20 +377,22 @@ def main_page():
     .side-menu { position: fixed; top: 0; left: -280px; width: 280px; height: 100vh; background: #080c14; border-right: 2px solid var(--primary); z-index: 2000; display: flex; flex-direction: column; padding: 40px 20px; }
     .menu-visible { left: 0 !important; }
     .drawer-handle { display: none !important; }
-    .bell-btn { border: 1px solid rgba(248, 250, 252, 0.3); color: #facc15; padding: 14px; font-size: 28px; }
+    .bell-btn { border: 1px solid rgba(248, 250, 252, 0.3); color: #facc15; padding: clamp(10px, 2.5vw, 18px); font-size: clamp(22px, 5vmin, 36px); min-width: clamp(44px, 10vmin, 56px); min-height: clamp(44px, 10vmin, 56px); }
     .bell-pressed { background: #22c55e; color: #020617 !important; box-shadow: 0 0 12px rgba(34,197,94,0.7); }
-    .price-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3000; background: var(--primary); color: var(--bg); padding: 10px 24px; font-size: 2vmin; font-weight: 900; border-radius: 0 0 10px 10px; display: flex; align-items: center; gap: 10px; }
-    .price-bar-icon-wrap { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .price-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3000; background: var(--primary); color: var(--bg); padding: clamp(6px, 1.2vw, 12px) clamp(12px, 3vw, 24px); font-size: clamp(1.2vmin, 2vw, 2vmin); font-weight: 900; border-radius: 0 0 10px 10px; display: flex; align-items: center; gap: 8px; max-width: min(95vw, 420px); flex-wrap: wrap; justify-content: center; }
+    .price-bar-icon-wrap { width: clamp(20px, 4vw, 28px); height: clamp(20px, 4vw, 28px); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .price-bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
     .price-bar-hidden { visibility: hidden; opacity: 0; pointer-events: none; }
     .price-bar-visible { visibility: visible; opacity: 1; }
-    .custom-display { position: fixed; top: 20px; right: 0; z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-radius: 25px 0 0 25px; padding: 18px 40px; display: flex; flex-direction: column; align-items: flex-end; }
-    .main-val { color: #00f2ff; font-size: 6.2vmin; font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; }
-    .main-unit { font-size: 2vmin; color: var(--primary); margin-left: 6px; }
-    .sub-info { color: #94a3b8; font-size: 2.2vmin; margin-top: 6px; }
-    .screen-center { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 95%; display: flex; justify-content: center; padding-bottom: 22vh; }
+    .custom-display { position: fixed; top: 20px; right: 0; z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-radius: 25px 0 0 25px; padding: clamp(12px, 2vw, 18px) clamp(24px, 4vw, 40px); display: flex; flex-direction: column; align-items: flex-end; }
+    .main-val { color: #00f2ff; font-size: clamp(4vmin, 6.2vmin, 8vmin); font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; white-space: nowrap; }
+    .main-unit { font-size: clamp(1.5vmin, 2vw, 2vmin); color: var(--primary); margin-left: 6px; }
+    .sub-info { color: #94a3b8; font-size: clamp(1.6vmin, 2.2vmin, 2.5vmin); margin-top: 4px; }
+    .grid-wrapper { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; padding: 80px 0 80px; }
+    .screen-center { width: 100%; display: flex; justify-content: center; align-items: center; }
     .video-bottom-wrap { position: fixed; bottom: 16px; right: 16px; z-index: 80; max-width: clamp(260px, 30vw, 420px); }
     .video-bottom { width: 100%; height: auto; border-radius: 10px; border: 1px solid rgba(255,255,255,0.25); object-fit: cover; background: #000; display: block; }
-    .buttons-grid { display: grid; grid-template-columns: repeat(5, var(--btn-size)); gap: 2.5vmin; } 
+    .buttons-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--btn-size), 1fr)); gap: clamp(1.5vmin, 2.5vmin, 3vmin); max-width: min(95vw, calc(5 * var(--btn-size) + 4 * 2.5vmin)); } 
     .action-btn { width: var(--btn-size); height: var(--btn-size); border-radius: 18%; background: #1e293b; border: 1px solid rgba(255, 255, 255, 0.1); color: #64748b; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; }
     .active-yellow { border: 2.5px solid var(--primary) !important; color: white !important; }
     .pause-stopped { border: 2.5px solid #2ecc71 !important; color: #2ecc71 !important; }
@@ -510,7 +524,7 @@ def main_page():
         price_bar_ref[0] = price_bar
         with ui.element('div').classes('price-bar-icon-wrap'):
             price_bar_icon_ref[0] = ui.html('')
-        price_bar_label_ref[0] = ui.label('').classes('font-bold')
+        price_bar_label_ref[0] = ui.label('').classes('font-bold price-bar-label')
 
     # --- Timer display ---
     def swap_display():
@@ -530,23 +544,23 @@ def main_page():
         ("btn11", "WHEELS"), ("btn12", "DRY"), ("btn13", "SMELL"), ("btn14", "WASH"), ("btn_pause", "START")
     ]
 
-    with ui.element('div').classes('screen-center'):
-        with ui.element('div').classes('buttons-grid'):
-            for bid, label in BUTTONS_DATA:
-                btn = ui.element('div').classes('action-btn icon-idle')
-                btn.on('click', lambda e, b=bid: handle_click(b))
-                with btn:
-                    if bid == 'btn_pause':
-                        pause_refs['svg'] = ui.html('')
-                        pause_refs['label'] = ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
-                    else:
-                        path = SVG_PATHS.get(bid)
-                        if not path:
-                            # fallback minimal icon (circle)
-                            path = "M500 200a300 300 0 1 0 0.001 0z"
-                        ui.html(f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>')
-                        ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
-                btns[bid] = btn
+    with ui.element('div').classes('grid-wrapper'):
+        with ui.element('div').classes('screen-center'):
+            with ui.element('div').classes('buttons-grid'):
+                for bid, label in BUTTONS_DATA:
+                    btn = ui.element('div').classes('action-btn icon-idle')
+                    btn.on('click', lambda e, b=bid: handle_click(b))
+                    with btn:
+                        if bid == 'btn_pause':
+                            pause_refs['svg'] = ui.html('')
+                            pause_refs['label'] = ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
+                        else:
+                            path = SVG_PATHS.get(bid)
+                            if not path:
+                                path = "M500 200a300 300 0 1 0 0.001 0z"
+                            ui.html(f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>')
+                            ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
+                    btns[bid] = btn
 
     # --- Bottom-right video button ---
     with ui.element('div').classes('video-bottom-wrap'):
