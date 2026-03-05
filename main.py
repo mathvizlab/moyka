@@ -2,7 +2,6 @@ import gc
 import asyncio
 import json
 import time
-from datetime import datetime
 from nicegui import ui
 
 try:
@@ -70,53 +69,39 @@ menu_open = [False]
 current_tab = [None]
 btns, pause_refs = {}, {}
 
-# Notifications: list of {"ts": float, "text": str}
-notifications = []
-notifications_container_ref = [None]
-notifications_panel_visible = [False]
-
 def notify(text):
-    notifications.append({"ts": time.time(), "text": str(text)})
-    _refresh_notifications_ui()
+    pass
 
-def _refresh_notifications_ui():
-    if not notifications_container_ref[0]:
+bell_btn_ref = [None]
+bell_revert_timer = [None]
+
+def set_bell_pressed_state(on):
+    if not bell_btn_ref[0]:
         return
-    container = notifications_container_ref[0]
-    container.clear()
-    with container:
-        for entry in reversed(notifications[-50:]):
-            ts = entry["ts"]
-            dt = datetime.fromtimestamp(ts)
-            tstr = dt.strftime("%H:%M:%S")
-            with ui.row().classes("w-full items-center gap-2 py-1 text-sm"):
-                ui.label(tstr).classes("text-gray-400 shrink-0")
-                ui.label(entry["text"]).classes("text-white truncate")
+    if bell_revert_timer[0]:
+        bell_revert_timer[0].cancel()
+        bell_revert_timer[0] = None
+    if on:
+        bell_btn_ref[0].classes(add="bell-btn-pressed", remove="bell-btn-default")
+    else:
+        bell_btn_ref[0].classes(add="bell-btn-default", remove="bell-btn-pressed")
+        bell_revert_timer[0] = None
 
-def clear_notifications():
-    notifications.clear()
-    _refresh_notifications_ui()
+def send_bell_signal():
+    print("BELL PRESSED: signal sent")
+    set_bell_pressed_state(True)
+    bell_revert_timer[0] = ui.timer(2.0, lambda: set_bell_pressed_state(False), once=True)
 
-def close_notifications_panel():
-    notifications_panel_visible[0] = False
-    if notifications_panel_ref[0]:
-        notifications_panel_ref[0].set_visibility(False)
-    if notifications_overlay_ref[0]:
-        notifications_overlay_ref[0].set_visibility(False)
+def video_play_pause():
+    ui.run_javascript(
+        'const v=document.getElementById("promoVideo");if(v){if(v.paused)v.play();else v.pause();}'
+    )
 
-def toggle_notifications_panel():
-    if not notifications_panel_ref[0]:
-        return
-    if notifications_panel_visible[0]:
-        close_notifications_panel()
-        return
-    notifications_panel_visible[0] = True
-    notifications_panel_ref[0].set_visibility(True)
-    if notifications_overlay_ref[0]:
-        notifications_overlay_ref[0].set_visibility(True)
+def video_restart():
+    ui.run_javascript(
+        'const v=document.getElementById("promoVideo");if(v){v.currentTime=0;v.play();}'
+    )
 
-notifications_panel_ref = [None]
-notifications_overlay_ref = [None]
 price_bar_ref = [None]
 price_bar_icon_ref = [None]
 price_bar_label_ref = [None]
@@ -363,9 +348,12 @@ def main_page():
     .main-val { color: #00f2ff; font-size: 6.2vmin; font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; }
     .main-unit { font-size: 2vmin; color: var(--primary); margin-left: 6px; }
     .sub-info { color: #94a3b8; font-size: 2.2vmin; margin-top: 6px; }
-    .screen-center { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 95%; display: flex; justify-content: center; padding-bottom: 22vh; }
-    .video-bottom { position: fixed; bottom: 0; left: 0; width: 100%; height: 18vh; z-index: 50; object-fit: cover; background: #000; }
-    .notif-panel { position: fixed; top: 56px; right: 12px; z-index: 2500; width: 320px; max-height: 60vh; overflow-y: auto; background: #0f172a; border: 2px solid var(--primary); border-radius: 12px; padding: 12px; }
+    .screen-center { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 95%; display: flex; justify-content: center; padding-bottom: 140px; }
+    .bell-btn-default { color: #94a3b8; }
+    .bell-btn-pressed { color: var(--primary) !important; box-shadow: 0 0 12px var(--primary); transform: scale(1.08); }
+    .video-widget { position: fixed; bottom: 16px; right: 16px; z-index: 50; width: clamp(320px, 28vw, 420px); border-radius: 12px; border: 1px solid rgba(255,255,255,0.2); overflow: hidden; background: #000; }
+    .video-widget video { width: 100%; height: auto; display: block; }
+    .video-controls { display: flex; gap: 8px; padding: 6px 8px; background: #0f172a; justify-content: center; }
     .buttons-grid { display: grid; grid-template-columns: repeat(5, var(--btn-size)); gap: 2.5vmin; } 
     .action-btn { width: var(--btn-size); height: var(--btn-size); border-radius: 18%; background: #1e293b; border: 1px solid rgba(255, 255, 255, 0.1); color: #64748b; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; }
     .active-yellow { border: 2.5px solid var(--primary) !important; color: white !important; }
@@ -489,20 +477,10 @@ def main_page():
                         ui.button('SAVE', on_click=make_save_handler(bid)).classes('w-full mt-2').props('color=primary')
     
 
-    # --- Bell (notifications) top-right ---
-    with ui.element('div').classes('fixed top-5 right-4 z-[110]'):
-        ui.button(icon='notifications').props('flat round').classes('text-yellow-500').on('click', toggle_notifications_panel)
-    with ui.element('div').classes('fixed inset-0 z-[2400]').style('background: transparent;').on('click', close_notifications_panel) as overlay:
-        notifications_overlay_ref[0] = overlay
-        overlay.set_visibility(False)
-    with ui.column().classes('notif-panel') as notif_panel:
-        notifications_panel_ref[0] = notif_panel
-        notif_panel.set_visibility(False)
-        ui.label('Notifications').classes('text-yellow-500 font-bold mb-2')
-        with ui.column().classes('w-full gap-0') as notif_container:
-            notifications_container_ref[0] = notif_container
-            _refresh_notifications_ui()
-        ui.button('Clear', on_click=clear_notifications).classes('w-full mt-2').props('flat color=primary')
+    # --- Bell (call/admin signal) center-right ---
+    with ui.element('div').classes('fixed z-[110]').style('top: 50%; right: 20px; transform: translateY(-50%);'):
+        bell_btn = ui.button(icon='notifications').props('flat round').classes('bell-btn-default').on('click', send_bell_signal)
+        bell_btn_ref[0] = bell_btn
 
     # --- Price bar (always visible when service selected) ---
     with ui.row().classes('price-bar price-bar-hidden').style('align-items: center;') as price_bar:
@@ -547,11 +525,15 @@ def main_page():
                         ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
                 btns[bid] = btn
 
-    # --- Bottom video player ---
-    ui.html(
-        f'<video class="video-bottom" autoplay muted loop playsinline controls src="{VIDEO_SRC}">'
-        'Your browser does not support the video tag.</video>'
-    )
+    # --- Video bottom-right + controls ---
+    with ui.element('div').classes('video-widget'):
+        ui.html(
+            f'<video id="promoVideo" autoplay muted loop playsinline src="{VIDEO_SRC}">'
+            'Your browser does not support the video tag.</video>'
+        )
+        with ui.row().classes('video-controls'):
+            ui.button(icon='play_arrow', on_click=video_play_pause).props('flat round').classes('text-yellow-500')
+            ui.button(icon='replay', on_click=video_restart).props('flat round').classes('text-yellow-500')
 
     update_ui()
     update_price_bar()
