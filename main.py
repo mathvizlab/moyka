@@ -2,6 +2,7 @@ import gc
 import asyncio
 import json
 import time
+from datetime import datetime
 from nicegui import ui
 
 try:
@@ -69,37 +70,61 @@ menu_open = [False]
 current_tab = [None]
 btns, pause_refs = {}, {}
 
+# Notifications: list of {"ts": float, "text": str}
+notifications = []
+notifications_container_ref = [None]
+
 def notify(text):
-    pass
+    notifications.append({"ts": time.time(), "text": str(text)})
+    _refresh_notifications_ui()
+
+def _refresh_notifications_ui():
+    if not notifications_container_ref[0]:
+        return
+    container = notifications_container_ref[0]
+    container.clear()
+    with container:
+        for entry in reversed(notifications[-50:]):
+            ts = entry["ts"]
+            dt = datetime.fromtimestamp(ts)
+            tstr = dt.strftime("%H:%M:%S")
+            with ui.row().classes("w-full items-center gap-2 py-1 text-sm"):
+                ui.label(tstr).classes("text-gray-400 shrink-0")
+                ui.label(entry["text"]).classes("text-white truncate")
+
+def clear_notifications():
+    notifications.clear()
+    _refresh_notifications_ui()
 
 bell_btn_ref = [None]
-bell_revert_timer = [None]
+bell_pressed_timer_ref = [None]
 
-def set_bell_pressed_state(on):
-    if not bell_btn_ref[0]:
+def set_bell_pressed_state(on: bool):
+    btn = bell_btn_ref[0]
+    if not btn:
         return
-    if bell_revert_timer[0]:
-        bell_revert_timer[0].cancel()
-        bell_revert_timer[0] = None
     if on:
-        bell_btn_ref[0].classes(add="bell-btn-pressed", remove="bell-btn-default")
+        btn.classes(add='bell-pressed', remove='')
     else:
-        bell_btn_ref[0].classes(add="bell-btn-default", remove="bell-btn-pressed")
-        bell_revert_timer[0] = None
+        btn.classes(remove='bell-pressed')
 
 def send_bell_signal():
     print("BELL PRESSED: signal sent")
     set_bell_pressed_state(True)
-    bell_revert_timer[0] = ui.timer(2.0, lambda: set_bell_pressed_state(False), once=True)
+    if bell_pressed_timer_ref[0]:
+        bell_pressed_timer_ref[0].cancel()
+    bell_pressed_timer_ref[0] = ui.timer(2.0, lambda: set_bell_pressed_state(False), once=True)
 
 def video_play_pause():
     ui.run_javascript(
-        'const v=document.getElementById("promoVideo");if(v){if(v.paused)v.play();else v.pause();}'
+        "const v=document.getElementById('promoVideo');"
+        "if(v){if(v.paused){v.play()}else{v.pause()}}"
     )
 
 def video_restart():
     ui.run_javascript(
-        'const v=document.getElementById("promoVideo");if(v){v.currentTime=0;v.play();}'
+        "const v=document.getElementById('promoVideo');"
+        "if(v){v.currentTime=0;v.play()}"
     )
 
 price_bar_ref = [None]
@@ -340,6 +365,8 @@ def main_page():
     .side-menu { position: fixed; top: 0; left: -280px; width: 280px; height: 100vh; background: #080c14; border-right: 2px solid var(--primary); z-index: 2000; display: flex; flex-direction: column; padding: 40px 20px; }
     .menu-visible { left: 0 !important; }
     .drawer-handle { display: none !important; }
+    .bell-btn { border: 1px solid rgba(248, 250, 252, 0.3); color: #facc15; padding: 14px; font-size: 28px; }
+    .bell-pressed { background: #22c55e; color: #020617 !important; box-shadow: 0 0 12px rgba(34,197,94,0.7); }
     .price-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3000; background: var(--primary); color: var(--bg); padding: 10px 24px; font-size: 2vmin; font-weight: 900; border-radius: 0 0 10px 10px; display: flex; align-items: center; gap: 10px; }
     .price-bar-icon-wrap { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
     .price-bar-hidden { visibility: hidden; opacity: 0; pointer-events: none; }
@@ -348,12 +375,9 @@ def main_page():
     .main-val { color: #00f2ff; font-size: 6.2vmin; font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; }
     .main-unit { font-size: 2vmin; color: var(--primary); margin-left: 6px; }
     .sub-info { color: #94a3b8; font-size: 2.2vmin; margin-top: 6px; }
-    .screen-center { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 95%; display: flex; justify-content: center; padding-bottom: 140px; }
-    .bell-btn-default { color: #94a3b8; }
-    .bell-btn-pressed { color: var(--primary) !important; box-shadow: 0 0 12px var(--primary); transform: scale(1.08); }
-    .video-widget { position: fixed; bottom: 16px; right: 16px; z-index: 50; width: clamp(320px, 28vw, 420px); border-radius: 12px; border: 1px solid rgba(255,255,255,0.2); overflow: hidden; background: #000; }
-    .video-widget video { width: 100%; height: auto; display: block; }
-    .video-controls { display: flex; gap: 8px; padding: 6px 8px; background: #0f172a; justify-content: center; }
+    .screen-center { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 95%; display: flex; justify-content: center; padding-bottom: 22vh; }
+    .video-bottom-wrap { position: fixed; bottom: 16px; right: 16px; z-index: 80; max-width: clamp(260px, 30vw, 420px); }
+    .video-bottom { width: 100%; height: auto; border-radius: 10px; border: 1px solid rgba(255,255,255,0.25); object-fit: cover; background: #000; display: block; }
     .buttons-grid { display: grid; grid-template-columns: repeat(5, var(--btn-size)); gap: 2.5vmin; } 
     .action-btn { width: var(--btn-size); height: var(--btn-size); border-radius: 18%; background: #1e293b; border: 1px solid rgba(255, 255, 255, 0.1); color: #64748b; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; }
     .active-yellow { border: 2.5px solid var(--primary) !important; color: white !important; }
@@ -477,10 +501,9 @@ def main_page():
                         ui.button('SAVE', on_click=make_save_handler(bid)).classes('w-full mt-2').props('color=primary')
     
 
-    # --- Bell (call/admin signal) center-right ---
+    # --- Bell (admin call) center-right ---
     with ui.element('div').classes('fixed z-[110]').style('top: 50%; right: 20px; transform: translateY(-50%);'):
-        bell_btn = ui.button(icon='notifications').props('flat round').classes('bell-btn-default').on('click', send_bell_signal)
-        bell_btn_ref[0] = bell_btn
+        bell_btn_ref[0] = ui.button(icon='notifications_active').props('flat round').classes('bell-btn').on('click', send_bell_signal)
 
     # --- Price bar (always visible when service selected) ---
     with ui.row().classes('price-bar price-bar-hidden').style('align-items: center;') as price_bar:
@@ -525,15 +548,9 @@ def main_page():
                         ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
                 btns[bid] = btn
 
-    # --- Video bottom-right + controls ---
-    with ui.element('div').classes('video-widget'):
-        ui.html(
-            f'<video id="promoVideo" autoplay muted loop playsinline src="{VIDEO_SRC}">'
-            'Your browser does not support the video tag.</video>'
-        )
-        with ui.row().classes('video-controls'):
-            ui.button(icon='play_arrow', on_click=video_play_pause).props('flat round').classes('text-yellow-500')
-            ui.button(icon='replay', on_click=video_restart).props('flat round').classes('text-yellow-500')
+    # --- Bottom-right video button ---
+    with ui.element('div').classes('video-bottom-wrap'):
+        ui.button(icon='ondemand_video').props('round fab color=primary').classes('shadow-lg')
 
     update_ui()
     update_price_bar()
