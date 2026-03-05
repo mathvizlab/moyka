@@ -60,6 +60,86 @@ SERVICE_NAMES = {
     "btn11": "WHEELS", "btn12": "DRY", "btn13": "SMELL", "btn14": "WASH"
 }
 
+# --- TRANSLATIONS (ENG, RUS, UZB) ---
+LANGS = ["eng", "rus", "uzb"]
+current_lang = ["eng"]
+
+TRANSLATIONS = {
+    "eng": {
+        "menu_lang": "Language", "menu_qr": "QR", "menu_cash": "Cash", "menu_info": "Info", "tab_lang_title": "Language",
+        "tab_revenue": "REVENUE DASHBOARD", "tab_price": "PRICE CONFIGURATION",
+        "price_per_min": "Price / minute (UZS):", "save": "SAVE", "total": "TOTAL",
+        "choose_mode": "CHOOSE MODE", "start": "START", "stop": "STOP", "time_unit": "TIME",
+        "selected": "Selected", "config_saved": "configuration saved", "price_positive": "Price must be positive", "invalid_input": "Invalid input",
+        "btn1": "FOAM", "btn2": "WAX", "btn3": "WATER", "btn4": "AIR", "btn5": "OSMOS",
+        "btn6": "TURBO", "btn7": "SHAMPOO", "btn8": "POLISH", "btn9": "STEAM", "btn10": "VACUUM",
+        "btn11": "WHEELS", "btn12": "DRY", "btn13": "SMELL", "btn14": "WASH",
+        "lang_eng": "English", "lang_rus": "Русский", "lang_uzb": "O'zbekcha",
+    },
+    "rus": {
+        "menu_lang": "Язык", "menu_qr": "QR", "menu_cash": "Касса", "menu_info": "Инфо", "tab_lang_title": "Язык",
+        "tab_revenue": "ВЫРУЧКА", "tab_price": "НАСТРОЙКА ЦЕН",
+        "price_per_min": "Цена / мин (UZS):", "save": "СОХРАНИТЬ", "total": "ИТОГО",
+        "choose_mode": "ВЫБЕРИТЕ РЕЖИМ", "start": "СТАРТ", "stop": "СТОП", "time_unit": "ВРЕМЯ",
+        "selected": "Выбрано", "config_saved": "настройки сохранены", "price_positive": "Цена должна быть положительной", "invalid_input": "Неверный ввод",
+        "btn1": "Пена", "btn2": "Воск", "btn3": "Вода", "btn4": "Воздух", "btn5": "Осмос",
+        "btn6": "Турбо", "btn7": "Шампунь", "btn8": "Полироль", "btn9": "Пар", "btn10": "Пылесос",
+        "btn11": "Колёса", "btn12": "Сушка", "btn13": "Аромат", "btn14": "Мойка",
+        "lang_eng": "English", "lang_rus": "Русский", "lang_uzb": "O'zbekcha",
+    },
+    "uzb": {
+        "menu_lang": "Til", "menu_qr": "QR", "menu_cash": "Kassa", "menu_info": "Ma'lumot", "tab_lang_title": "Til",
+        "tab_revenue": "DAROMAD", "tab_price": "NARXLAR",
+        "price_per_min": "Narx / min (UZS):", "save": "SAQLASH", "total": "JAMI",
+        "choose_mode": "REJIMNI TANLANG", "start": "BOSHLASH", "stop": "TO'XTATISH", "time_unit": "VAQT",
+        "selected": "Tanlangan", "config_saved": "sozlamalar saqlandi", "price_positive": "Narx musbat bo'lishi kerak", "invalid_input": "Noto'g'ri kiritish",
+        "btn1": "Ko'pik", "btn2": "Momiq", "btn3": "Suv", "btn4": "Havo", "btn5": "Osmos",
+        "btn6": "Turbo", "btn7": "Shampun", "btn8": "Politur", "btn9": "Bug'", "btn10": "Changyutgich",
+        "btn11": "G'ildiraklar", "btn12": "Quritish", "btn13": "Hidi", "btn14": "Yuvish",
+        "lang_eng": "English", "lang_rus": "Русский", "lang_uzb": "O'zbekcha",
+    },
+}
+
+def t(key):
+    return TRANSLATIONS.get(current_lang[0], TRANSLATIONS["eng"]).get(key, key)
+
+def set_lang(lang):
+    current_lang[0] = lang
+    refresh_all_ui_text()
+
+def _set_el_text(el, text):
+    if not el:
+        return
+    if hasattr(el, 'set_text'):
+        el.set_text(text)
+    elif hasattr(el, 'text'):
+        el.text = text
+
+def refresh_all_ui_text():
+    for key, el in ui_refs.items():
+        _set_el_text(el, t(key))
+    for bid, el in revenue_name_refs.items():
+        _set_el_text(el, t(bid))
+    for bid, el in info_name_refs.items():
+        _set_el_text(el, t(bid))
+    for el in price_per_min_refs:
+        _set_el_text(el, t('price_per_min'))
+    for el in save_btn_refs:
+        _set_el_text(el, t('save'))
+    for bid, el in grid_label_refs.items():
+        _set_el_text(el, t(bid))
+    update_pause_visuals()
+    update_price_bar()
+    update_ui()
+
+# Refs for labels that need translation refresh
+ui_refs = {}
+revenue_name_refs = {}  # bid -> label for CASH tab service names
+info_name_refs = {}    # bid -> label for INFO tab service names
+price_per_min_refs = []  # labels "Price / minute"
+save_btn_refs = []       # SAVE buttons in INFO tab
+grid_label_refs = {}   # bid -> label for service names in button grid
+
 # --- СИСТЕМНАЯ ЛОГИКА ---
 DEFAULT_SESSION_SECONDS = 30 * 60
 remaining_seconds = [0]  # source of truth for time; 0 = no session
@@ -78,8 +158,7 @@ def start_session_if_needed():
 def switch_service(bid):
     active_btn_id[0] = bid
     refresh_button_visuals()
-    service_name = SERVICE_NAMES.get(bid, "")
-    notify(f"Selected {service_name}")
+    notify(f"{t('selected')} {t(bid)}")
     update_price_bar()
 
 def set_running(running: bool):
@@ -181,7 +260,7 @@ def update_price_bar():
         bar.classes(remove="price-bar-visible", add="price-bar-hidden")
         return
     bar.classes(remove="price-bar-hidden", add="price-bar-visible")
-    name = SERVICE_NAMES.get(bid, "")
+    name = t(bid)
     price = service_config[bid]["price_per_min"]
     path = get_svg_path(bid)
     svg = f'<svg width="28" height="28" viewBox="0 0 1000 1000" style="fill:#020617; display:block;"><path d="{path}"/></svg>'
@@ -201,7 +280,7 @@ def update_ui():
 
     if display_mode[0] == 0:
         main_display.set_text(time_str)
-        main_unit.set_text("TIME")
+        main_unit.set_text(t('time_unit'))
         sub_display.set_text(f"{formatted_money} {currency_code[0]}")
     else:
         main_display.set_text(formatted_money)
@@ -261,7 +340,7 @@ def refresh_button_visuals():
 
 def toggle_pause():
     if not active_btn_id[0]:
-        ui.notify("CHOOSE MODE", color='orange')
+        ui.notify(t('choose_mode'), color='orange')
         return
     is_paused[0] = not is_paused[0]
     notify("Started" if not is_paused[0] else "Stopped")
@@ -273,11 +352,11 @@ def update_pause_visuals():
     
     if is_paused[0]:
         p_btn.classes(remove='pause-active scale-active', add='pause-stopped')
-        pause_refs['label'].set_text('START')
+        pause_refs['label'].set_text(t('start'))
         pause_refs['svg'].content = f'<svg width="5.5vmin" height="5.5vmin" viewBox="0 0 1000 1000" style="fill:#2ecc71;"><path d="{PATH_PLAY}"/></svg>'
     else:
         p_btn.classes(remove='pause-stopped', add='pause-active scale-active')
-        pause_refs['label'].set_text('STOP')
+        pause_refs['label'].set_text(t('stop'))
         pause_refs['svg'].content = f'<svg width="5.5vmin" height="5.5vmin" viewBox="0 0 1000 1000" style="fill:#ff4757;"><path d="{PATH_PAUSE}"/></svg>'
 
 def toggle_menu():
@@ -362,6 +441,12 @@ def main_page():
     btns.clear()
     pause_refs.clear()
     tab_contents.clear()
+    revenue_name_refs.clear()
+    info_name_refs.clear()
+    price_per_min_refs.clear()
+    save_btn_refs.clear()
+    grid_label_refs.clear()
+    ui_refs.clear()
     load_app_state()
 
     ui.timer(0, timer_loop, once=True)
@@ -424,29 +509,33 @@ def main_page():
         
         # Tab buttons
         with ui.column().classes('w-full'):
-            lang_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start')
+            lang_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('lang'))
             with lang_btn:
                 with ui.row().classes('items-center w-full'):
                     ui.icon('language', color='yellow-500', size='24px').classes('mr-4')
-                    ui.label('Language').classes('text-white text-sm font-bold')
+                    lbl = ui.label(t('menu_lang')).classes('text-white text-sm font-bold')
+                    ui_refs['menu_lang'] = lbl
             
             qr_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start')
             with qr_btn:
                 with ui.row().classes('items-center w-full'):
                     ui.icon('qr_code_2', color='yellow-500', size='24px').classes('mr-4')
-                    ui.label('QR').classes('text-white text-sm font-bold')
+                    lbl = ui.label(t('menu_qr')).classes('text-white text-sm font-bold')
+                    ui_refs['menu_qr'] = lbl
             
             cash_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('cash'))
             with cash_btn:
                 with ui.row().classes('items-center w-full'):
                     ui.icon('payments', color='yellow-500', size='24px').classes('mr-4')
-                    ui.label('Cash').classes('text-white text-sm font-bold')
+                    lbl = ui.label(t('menu_cash')).classes('text-white text-sm font-bold')
+                    ui_refs['menu_cash'] = lbl
             
             info_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('info'))
             with info_btn:
                 with ui.row().classes('items-center w-full'):
                     ui.icon('info', color='yellow-500', size='24px').classes('mr-4')
-                    ui.label('Info').classes('text-white text-sm font-bold')
+                    lbl = ui.label(t('menu_info')).classes('text-white text-sm font-bold')
+                    ui_refs['menu_info'] = lbl
         
         # Tab content containers
         with ui.column().classes('w-full mt-4').style('max-height: calc(100vh - 200px); overflow-y: auto;') as tab_container:
@@ -454,18 +543,20 @@ def main_page():
             with ui.column().classes('w-full') as cash_tab:
                 cash_tab.set_visibility(False)
                 tab_contents['cash'] = cash_tab
-                ui.label('REVENUE DASHBOARD').classes('text-yellow-500 font-bold mb-4 text-center').style('font-size: 14px')
+                lbl = ui.label(t('tab_revenue')).classes('text-yellow-500 font-bold mb-4 text-center').style('font-size: 14px')
+                ui_refs['tab_revenue'] = lbl
                 
                 revenue_labels = {}
                 for bid in SERVICE_NAMES.keys():
-                    name = SERVICE_NAMES[bid]
                     with ui.row().classes('w-full justify-between items-center mb-3 p-2').style('background: #1e293b; border-radius: 8px;'):
-                        ui.label(name).classes('text-white font-bold')
+                        nl = ui.label(t(bid)).classes('text-white font-bold')
+                        revenue_name_refs[bid] = nl
                         revenue_labels[bid] = ui.label('0 UZS').classes('text-yellow-500 font-bold')
                 
                 ui.separator().classes('my-4')
                 with ui.row().classes('w-full justify-between items-center p-3').style('background: #0f172a; border: 2px solid var(--primary); border-radius: 8px;'):
-                    ui.label('TOTAL').classes('text-white font-bold text-lg')
+                    tl = ui.label(t('total')).classes('text-white font-bold text-lg')
+                    ui_refs['total'] = tl
                     total_revenue_label = ui.label('0 UZS').classes('text-yellow-500 font-bold text-lg')
                 
                 def update_revenue_display():
@@ -479,22 +570,36 @@ def main_page():
                 
                 ui.timer(1.0, update_revenue_display)
             
+            # Language Tab
+            with ui.column().classes('w-full') as lang_tab:
+                lang_tab.set_visibility(False)
+                tab_contents['lang'] = lang_tab
+                lbl = ui.label(t('tab_lang_title')).classes('text-yellow-500 font-bold mb-4 text-center').style('font-size: 14px')
+                ui_refs['tab_lang_title'] = lbl
+                with ui.column().classes('w-full gap-3'):
+                    for lang_code in LANGS:
+                        key = f'lang_{lang_code}'
+                        ui.button(t(key)).classes('w-full').props('color=primary').on('click', lambda _, lc=lang_code: set_lang(lc))
+            
             # INFO Tab
             with ui.column().classes('w-full') as info_tab:
                 info_tab.set_visibility(False)
                 tab_contents['info'] = info_tab
-                ui.label('PRICE CONFIGURATION').classes('text-yellow-500 font-bold mb-4 text-center').style('font-size: 14px')
+                lbl = ui.label(t('tab_price')).classes('text-yellow-500 font-bold mb-4 text-center').style('font-size: 14px')
+                ui_refs['tab_price'] = lbl
                 
                 price_inputs = {}
+                price_name_refs = {}
                 
                 for bid in SERVICE_NAMES.keys():
-                    name = SERVICE_NAMES[bid]
                     config = service_config[bid]
                     
                     with ui.card().classes('w-full mb-3').style('background: #1e293b;'):
-                        ui.label(name).classes('text-yellow-500 font-bold mb-2')
+                        nl = ui.label(t(bid)).classes('text-yellow-500 font-bold mb-2')
+                        info_name_refs[bid] = nl
 
-                        ui.label('Price / minute (UZS):').classes('text-white text-sm mb-1')
+                        pl = ui.label(t('price_per_min')).classes('text-white text-sm mb-1')
+                        price_per_min_refs.append(pl)
                         price_input = ui.number(label='', value=config["price_per_min"], format='%.0f', precision=0).classes('w-full text-white')
                         price_inputs[bid] = price_input
                         
@@ -503,16 +608,17 @@ def main_page():
                                 try:
                                     price_per_min = int(price_inputs[bid].value)
                                     if price_per_min <= 0:
-                                        ui.notify("Price must be positive", color='red')
+                                        ui.notify(t('price_positive'), color='red')
                                         return
                                     update_service_config(bid, price_per_min)
                                     save_app_state()
-                                    ui.notify(f"{SERVICE_NAMES[bid]} configuration saved", color='green')
+                                    ui.notify(f"{t(bid)} {t('config_saved')}", color='green')
                                 except Exception:
-                                    ui.notify("Invalid input", color='red')
+                                    ui.notify(t('invalid_input'), color='red')
                             return save
                         
-                        ui.button('SAVE', on_click=make_save_handler(bid)).classes('w-full mt-2').props('color=primary')
+                        save_btn = ui.button(t('save'), on_click=make_save_handler(bid)).classes('w-full mt-2').props('color=primary')
+                        save_btn_refs.append(save_btn)
     
 
     # --- Bell (admin call) center-right ---
@@ -539,27 +645,26 @@ def main_page():
 
     # --- СЕТКА ---
     BUTTONS_DATA = [
-        ("btn1", "FOAM"), ("btn2", "WAX"), ("btn3", "WATER"), ("btn4", "AIR"), ("btn5", "OSMOS"),
-        ("btn6", "TURBO"), ("btn7", "SHAMPOO"), ("btn8", "POLISH"), ("btn9", "STEAM"), ("btn10", "VACUUM"),
-        ("btn11", "WHEELS"), ("btn12", "DRY"), ("btn13", "SMELL"), ("btn14", "WASH"), ("btn_pause", "START")
+        "btn1", "btn2", "btn3", "btn4", "btn5", "btn6", "btn7", "btn8",
+        "btn9", "btn10", "btn11", "btn12", "btn13", "btn14", "btn_pause"
     ]
-
     with ui.element('div').classes('grid-wrapper'):
         with ui.element('div').classes('screen-center'):
             with ui.element('div').classes('buttons-grid'):
-                for bid, label in BUTTONS_DATA:
+                for bid in BUTTONS_DATA:
                     btn = ui.element('div').classes('action-btn icon-idle')
                     btn.on('click', lambda e, b=bid: handle_click(b))
                     with btn:
                         if bid == 'btn_pause':
                             pause_refs['svg'] = ui.html('')
-                            pause_refs['label'] = ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
+                            pause_refs['label'] = ui.label(t('start')).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
                         else:
                             path = SVG_PATHS.get(bid)
                             if not path:
                                 path = "M500 200a300 300 0 1 0 0.001 0z"
                             ui.html(f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>')
-                            ui.label(label).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
+                            lbl = ui.label(t(bid)).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
+                            grid_label_refs[bid] = lbl
                     btns[bid] = btn
 
     # --- Bottom-right video button ---
