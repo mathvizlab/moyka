@@ -3,7 +3,7 @@ import asyncio
 import json
 import time
 from datetime import datetime
-from nicegui import ui
+from nicegui import events, ui
 
 try:
     from icons import SVG_PATHS
@@ -75,6 +75,14 @@ TRANSLATIONS = {
         "btn6": "TURBO", "btn7": "SHAMPOO", "btn8": "POLISH", "btn9": "STEAM", "btn10": "VACUUM",
         "btn11": "WHEELS", "btn12": "DRY", "btn13": "SMELL", "btn14": "WASH",
         "lang_eng": "English", "lang_rus": "Русский", "lang_uzb": "O'zbekcha",
+        "menu_bonus": "Bonus", "menu_free_pause": "Free pause",
+        "tab_bonus": "BONUS (%)", "tab_free_pause": "FREE PAUSE",
+        "free_pause_label": "Free pause (seconds)",
+        "free_pause_hint": "N seconds: pause is free (no time/money). Then the wash resumes automatically on the same service. 0 = pause until Start.",
+        "auto_resumed": "Free pause ended — wash running",
+        "bonus_label": "Bonus (%)", "bonus_hint": "Extra +(bonus)% on top-up only (пополнение). Not applied to per-second wash billing.",
+        "bonus_saved": "Bonus saved", "pause_saved": "Free pause saved",
+        "topup_done": "Top-up applied", "topup_need_service": "Select a wash mode first",
     },
     "rus": {
         "menu_lang": "Язык", "menu_qr": "QR", "menu_cash": "Касса", "menu_info": "Инфо", "tab_lang_title": "Язык",
@@ -86,6 +94,14 @@ TRANSLATIONS = {
         "btn6": "Турбо", "btn7": "Шампунь", "btn8": "Полироль", "btn9": "Пар", "btn10": "Пылесос",
         "btn11": "Колёса", "btn12": "Сушка", "btn13": "Аромат", "btn14": "Мойка",
         "lang_eng": "English", "lang_rus": "Русский", "lang_uzb": "O'zbekcha",
+        "menu_bonus": "Бонус", "menu_free_pause": "Бесплатная пауза",
+        "tab_bonus": "БОНУС (%)", "tab_free_pause": "БЕСПЛАТНАЯ ПАУЗА",
+        "free_pause_label": "Бесплатная пауза (сек)",
+        "free_pause_hint": "N сек — пауза бесплатно (время и деньги не идут). Потом мойка сама продолжается на том же режиме. 0 — до кнопки Старт.",
+        "auto_resumed": "Пауза закончилась — мойка снова идёт",
+        "bonus_label": "Бонус (%)", "bonus_hint": "Доп. +(бонус)% только при пополнении. К посекундной мойке не относится.",
+        "bonus_saved": "Бонус сохранён", "pause_saved": "Пауза сохранена",
+        "topup_done": "Пополнение выполнено", "topup_need_service": "Сначала выберите режим",
     },
     "uzb": {
         "menu_lang": "Til", "menu_qr": "QR", "menu_cash": "Kassa", "menu_info": "Ma'lumot", "tab_lang_title": "Til",
@@ -97,6 +113,14 @@ TRANSLATIONS = {
         "btn6": "Turbo", "btn7": "Shampun", "btn8": "Politur", "btn9": "Bug'", "btn10": "Changyutgich",
         "btn11": "G'ildiraklar", "btn12": "Quritish", "btn13": "Hidi", "btn14": "Yuvish",
         "lang_eng": "English", "lang_rus": "Русский", "lang_uzb": "O'zbekcha",
+        "menu_bonus": "Bonus", "menu_free_pause": "Bepul pauza",
+        "tab_bonus": "BONUS (%)", "tab_free_pause": "BEPUL PAUZA",
+        "free_pause_label": "Bepul pauza (sekund)",
+        "free_pause_hint": "N sek — pauza bepul. Keyin avtomatik davom etadi. 0 — Startgacha.",
+        "auto_resumed": "Pauza tugadi — yuvish davom etadi",
+        "bonus_label": "Bonus (%)", "bonus_hint": "Faqat to'ldirishda +(bonus)% qo'shimcha. Sekundlik yuvish tarifiga ta'sir qilmaydi.",
+        "bonus_saved": "Bonus saqlandi", "pause_saved": "Pauza saqlandi",
+        "topup_done": "To'ldirildi", "topup_need_service": "Avval rejimni tanlang",
     },
 }
 
@@ -150,6 +174,15 @@ currency_code = ["UZS"]
 menu_open = [False]
 current_tab = [None]
 btns, pause_refs = {}, {}
+# Q → menu: admin-adjustable
+# Free pause N>0: after user presses Pause, wash is frozen N seconds only, then auto-resumes (same service, timer + money flow).
+# N=0: pause until user presses Start.
+free_pause_seconds = [0]
+bonus_percent = [0.0]
+pause_started_at = [None]
+# Smooth countdown: bill every 1s via accumulator; display interpolates within current second
+bill_accumulator = [0.0]
+billing_phase_start = [None]  # monotonic() at start of current displayed second slice (when running)
 
 def start_session_if_needed():
     if remaining_seconds[0] <= 0:
@@ -161,8 +194,17 @@ def switch_service(bid):
     notify(f"{t('selected')} {t(bid)}")
     update_price_bar()
 
+def _sync_running_phase():
+    """Reset fractional billing and display phase when session starts running."""
+    billing_phase_start[0] = time.monotonic()
+    bill_accumulator[0] = 0.0
+
+
 def set_running(running: bool):
     is_paused[0] = not running
+    if running:
+        pause_started_at[0] = None
+        _sync_running_phase()
     update_pause_visuals()
 
 # Notifications: list of {"ts": float, "text": str}
@@ -247,9 +289,42 @@ PATH_PAUSE = "M200 200h200v600h-200zM600 200h200v600h-200z"
 PATH_PLAY = "M300 200l500 300-500 300z" 
 
 def get_current_price_per_second():
-    if not active_btn_id[0] or active_btn_id[0] not in service_config:
-        return 0
-    return service_config[active_btn_id[0]]["price_per_second"]
+    """UZS per second from configured UZS/min (Info); avoids stale price_per_second in dict."""
+    bid = active_btn_id[0]
+    if not bid or bid not in service_config:
+        return 0.0
+    ppm = float(service_config[bid]["price_per_min"])
+    return (ppm / 60.0) if ppm > 0 else 0.0
+
+
+def bonus_multiplier():
+    return 1.0 + max(0.0, float(bonus_percent[0])) / 100.0
+
+
+def apply_topup(money_uzs: float = 0.0, seconds: int = 0):
+    """пополнение: add paid money and/or time; bonus % multiplies both credits (not used on running timer ticks)."""
+    if not active_btn_id[0]:
+        ui.notify(t('topup_need_service'), color='orange')
+        return
+    m = bonus_multiplier()
+    mu = max(0.0, float(money_uzs))
+    sec = max(0, int(seconds))
+    if mu <= 0 and sec <= 0:
+        return
+    bid = active_btn_id[0]
+    if mu > 0:
+        service_revenue[bid] += mu * m
+    if sec > 0:
+        add = int(round(sec * m))
+        if remaining_seconds[0] <= 0:
+            remaining_seconds[0] = add
+        else:
+            remaining_seconds[0] += add
+        if not is_paused[0]:
+            _sync_running_phase()
+    save_app_state()
+    update_ui()
+    ui.notify(t('topup_done'), color='green')
 
 def update_price_bar():
     bar, icon_el, label_el = price_bar_ref[0], price_bar_icon_ref[0], price_bar_label_ref[0]
@@ -270,12 +345,23 @@ def update_price_bar():
 
 def update_ui():
     if 'main_display' not in globals(): return
-    sec = max(0, remaining_seconds[0])
+    if (
+        not is_paused[0]
+        and active_btn_id[0]
+        and remaining_seconds[0] > 0
+        and billing_phase_start[0] is not None
+    ):
+        elapsed = time.monotonic() - billing_phase_start[0]
+        display_sec_float = max(0.0, float(remaining_seconds[0]) - elapsed)
+    else:
+        display_sec_float = float(max(0, remaining_seconds[0]))
+    sec = max(0, int(display_sec_float))
     minutes = sec // 60
     seconds = sec % 60
     time_str = f"{minutes:02d}:{seconds:02d}"
+    # Сумма на экране = «сколько ещё висит» в UZS по текущему тарифу (UZS/min из меню)
     rate = get_current_price_per_second()
-    money = int(sec * rate) if rate > 0 else 0
+    money = int(display_sec_float * rate + 1e-6) if rate > 0 else 0
     formatted_money = f"{money:,}".replace(",", " ")
 
     if display_mode[0] == 0:
@@ -288,20 +374,54 @@ def update_ui():
         sub_display.set_text(time_str)
 
 async def timer_loop():
+    dt = 0.05
     while True:
-        if not is_paused[0] and active_btn_id[0] and remaining_seconds[0] > 0:
-            price_per_sec = get_current_price_per_second()
-            if price_per_sec > 0:
-                remaining_seconds[0] -= 1
-                service_revenue[active_btn_id[0]] += price_per_sec
-                if remaining_seconds[0] <= 0:
-                    stop_everything()
+        now = time.monotonic()
+
+        # Автовыход из бесплатной паузы: ровно N секунд «стоп», затем снова мойка (как нажали Старт)
+        if is_paused[0] and active_btn_id[0] and pause_started_at[0] is not None:
+            n = int(free_pause_seconds[0])
+            if n > 0 and (now - pause_started_at[0]) >= float(n):
+                is_paused[0] = False
+                pause_started_at[0] = None
+                _sync_running_phase()
+                update_pause_visuals()
+                notify(t('auto_resumed'))
                 update_ui()
+
+        ticked = False
+        if not is_paused[0] and active_btn_id[0] and remaining_seconds[0] > 0:
+            if billing_phase_start[0] is None:
+                billing_phase_start[0] = now
+            bill_accumulator[0] += dt
+            while bill_accumulator[0] >= 1.0 and remaining_seconds[0] > 0:
+                bill_accumulator[0] -= 1.0
+                price_per_sec = get_current_price_per_second()
+                remaining_seconds[0] -= 1
+                if price_per_sec > 0:
+                    service_revenue[active_btn_id[0]] += price_per_sec
+                billing_phase_start[0] = time.monotonic()
+                ticked = True
+                if remaining_seconds[0] <= 0:
+                    bill_accumulator[0] = 0.0
+                    billing_phase_start[0] = None
+                    stop_everything()
+                    ticked = False
+                    break
+            if ticked:
                 save_app_state()
-        await asyncio.sleep(1)
+        else:
+            bill_accumulator[0] = 0.0
+
+        if active_btn_id[0] and (remaining_seconds[0] > 0 or not is_paused[0]):
+            update_ui()
+        await asyncio.sleep(dt)
 
 def stop_everything():
     is_paused[0] = True
+    pause_started_at[0] = None
+    billing_phase_start[0] = None
+    bill_accumulator[0] = 0.0
     active_btn_id[0] = None
     remaining_seconds[0] = 0
     notify("Session ended — time reached 0")
@@ -343,8 +463,15 @@ def toggle_pause():
         ui.notify(t('choose_mode'), color='orange')
         return
     is_paused[0] = not is_paused[0]
+    if is_paused[0]:
+        pause_started_at[0] = time.monotonic()
+        bill_accumulator[0] = 0.0
+    else:
+        pause_started_at[0] = None
+        _sync_running_phase()
     notify("Started" if not is_paused[0] else "Stopped")
     update_pause_visuals()
+    update_ui()
 
 def update_pause_visuals():
     p_btn = btns.get('btn_pause')
@@ -362,6 +489,18 @@ def update_pause_visuals():
 def toggle_menu():
     menu_open[0] = not menu_open[0]
     left_panel.classes(add='menu-visible' if menu_open[0] else '', remove='menu-visible' if not menu_open[0] else '')
+
+
+def _menu_hotkey(e: events.KeyEventArguments) -> None:
+    """Q toggles side menu; works when grid buttons (div) are focused. Ignored in text fields."""
+    if not e.action.keydown or e.action.repeat:
+        return
+    if e.modifiers.ctrl or e.modifiers.meta or e.modifiers.alt:
+        return
+    key = e.key.name if hasattr(e.key, 'name') else e.key
+    if str(key).lower() != 'q':
+        return
+    toggle_menu()
 
 def update_service_config(bid, price_per_min):
     if bid not in service_config:
@@ -386,6 +525,8 @@ def build_app_state():
         "revenues": {
             bid: revenue for bid, revenue in service_revenue.items()
         },
+        "free_pause_seconds": int(free_pause_seconds[0]),
+        "bonus_percent": float(bonus_percent[0]),
     }
 
 def save_app_state():
@@ -421,6 +562,15 @@ def _apply_loaded_state(state_json: str):
                 service_revenue[bid] = float(val)
             except Exception:
                 continue
+
+    try:
+        free_pause_seconds[0] = max(0, int(data.get("free_pause_seconds", 0)))
+    except Exception:
+        pass
+    try:
+        bonus_percent[0] = max(0.0, float(data.get("bonus_percent", 0)))
+    except Exception:
+        pass
 
 def load_app_state():
     # NiceGUI version in this project does not support result callbacks from run_javascript,
@@ -486,20 +636,29 @@ def main_page():
     .tab-content::-webkit-scrollbar { width: 6px; }
     .tab-content::-webkit-scrollbar-track { background: #0f172a; }
     .tab-content::-webkit-scrollbar-thumb { background: var(--primary); border-radius: 3px; }
+    /* Side menu: Quasar inputs default to dark-on-dark — force readable text */
+    .side-menu .menu-admin-input .q-field__native,
+    .side-menu .menu-admin-input .q-field__input,
+    .side-menu .menu-admin-input input {
+      color: #f8fafc !important;
+      -webkit-text-fill-color: #f8fafc !important;
+      caret-color: #ffcc00;
+      opacity: 1 !important;
+      font-size: 15px !important;
+    }
+    .side-menu .menu-admin-input .q-field__control {
+      background: rgba(30, 41, 59, 0.95) !important;
+    }
+    .side-menu .menu-admin-input .q-field__label {
+      color: #cbd5e1 !important;
+    }
+    .side-menu .menu-admin-input .q-field__marginal,
+    .side-menu .menu-admin-input .q-field__append {
+      color: #f8fafc !important;
+    }
     * { transition: none !important; }
     *:hover { transition: none !important; }
     </style>
-    <script>
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'q' || e.key === 'Q') {
-            e.preventDefault();
-            const menu = document.querySelector('.side-menu');
-            if (menu) {
-                menu.classList.toggle('menu-visible');
-            }
-        }
-    });
-    </script>
     """)
 
     # --- МЕНЮ ---
@@ -536,6 +695,20 @@ def main_page():
                     ui.icon('info', color='yellow-500', size='24px').classes('mr-4')
                     lbl = ui.label(t('menu_info')).classes('text-white text-sm font-bold')
                     ui_refs['menu_info'] = lbl
+
+            bonus_menu_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('bonus'))
+            with bonus_menu_btn:
+                with ui.row().classes('items-center w-full'):
+                    ui.icon('card_giftcard', color='yellow-500', size='24px').classes('mr-4')
+                    lbl = ui.label(t('menu_bonus')).classes('text-white text-sm font-bold')
+                    ui_refs['menu_bonus'] = lbl
+
+            free_pause_menu_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('free_pause'))
+            with free_pause_menu_btn:
+                with ui.row().classes('items-center w-full'):
+                    ui.icon('timer', color='yellow-500', size='24px').classes('mr-4')
+                    lbl = ui.label(t('menu_free_pause')).classes('text-white text-sm font-bold')
+                    ui_refs['menu_free_pause'] = lbl
         
         # Tab content containers
         with ui.column().classes('w-full mt-4').style('max-height: calc(100vh - 200px); overflow-y: auto;') as tab_container:
@@ -600,13 +773,18 @@ def main_page():
 
                         pl = ui.label(t('price_per_min')).classes('text-white text-sm mb-1')
                         price_per_min_refs.append(pl)
-                        price_input = ui.number(label='', value=config["price_per_min"], format='%.0f', precision=0).classes('w-full text-white')
+                        price_input = ui.input(
+                            label='',
+                            value=str(int(config["price_per_min"])),
+                            placeholder='UZS/min',
+                        ).props('outlined dense autocomplete=off').classes('w-full menu-admin-input')
                         price_inputs[bid] = price_input
                         
                         def make_save_handler(bid):
                             def save():
                                 try:
-                                    price_per_min = int(price_inputs[bid].value)
+                                    raw = str(price_inputs[bid].value or '').strip().replace(',', '.')
+                                    price_per_min = int(float(raw or 0))
                                     if price_per_min <= 0:
                                         ui.notify(t('price_positive'), color='red')
                                         return
@@ -619,7 +797,60 @@ def main_page():
                         
                         save_btn = ui.button(t('save'), on_click=make_save_handler(bid)).classes('w-full mt-2').props('color=primary')
                         save_btn_refs.append(save_btn)
-    
+
+            # Bonus tab (admin — Q menu)
+            with ui.column().classes('w-full') as bonus_tab:
+                bonus_tab.set_visibility(False)
+                tab_contents['bonus'] = bonus_tab
+                stb = ui.label(t('tab_bonus')).classes('text-yellow-500 font-bold mb-2 text-center').style('font-size: 14px')
+                ui_refs['tab_bonus'] = stb
+                bh = ui.label(t('bonus_hint')).classes('text-gray-400 text-xs mb-2')
+                ui_refs['bonus_hint'] = bh
+                bp_input = ui.input(
+                    label=t('bonus_label'),
+                    value=str(bonus_percent[0]),
+                    placeholder='0',
+                ).props('outlined dense autocomplete=off').classes('w-full menu-admin-input')
+
+                def save_bonus():
+                    try:
+                        raw = str(bp_input.value or '').strip().replace(',', '.')
+                        bonus_percent[0] = max(0.0, float(raw or 0))
+                        save_app_state()
+                        ui.notify(t('bonus_saved'), color='green')
+                        update_ui()
+                    except Exception:
+                        ui.notify(t('invalid_input'), color='red')
+
+                ui.button(t('save'), on_click=save_bonus).classes('w-full mt-3').props('color=primary')
+
+            # Free pause tab (admin — Q menu)
+            with ui.column().classes('w-full') as free_pause_tab:
+                free_pause_tab.set_visibility(False)
+                tab_contents['free_pause'] = free_pause_tab
+                stp = ui.label(t('tab_free_pause')).classes('text-yellow-500 font-bold mb-2 text-center').style('font-size: 14px')
+                ui_refs['tab_free_pause'] = stp
+                ph = ui.label(t('free_pause_hint')).classes('text-gray-400 text-xs mb-2')
+                ui_refs['free_pause_hint'] = ph
+                fp_input = ui.input(
+                    label=t('free_pause_label'),
+                    value=str(int(free_pause_seconds[0])),
+                    placeholder='0',
+                ).props('outlined dense autocomplete=off').classes('w-full menu-admin-input')
+
+                def save_free_pause():
+                    try:
+                        raw = str(fp_input.value or '').strip().replace(',', '.')
+                        free_pause_seconds[0] = max(0, int(float(raw or 0)))
+                        save_app_state()
+                        ui.notify(t('pause_saved'), color='green')
+                    except Exception:
+                        ui.notify(t('invalid_input'), color='red')
+
+                ui.button(t('save'), on_click=save_free_pause).classes('w-full mt-3').props('color=primary')
+
+    # Global Q — must go through NiceGUI so menu state and DOM stay in sync (raw JS toggle was unreliable).
+    ui.keyboard(on_key=_menu_hotkey, ignore=['input', 'textarea', 'select'])
 
     # --- Bell (admin call) center-right ---
     with ui.element('div').classes('fixed z-[110]').style('top: 50%; right: 20px; transform: translateY(-50%);'):
