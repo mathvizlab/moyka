@@ -3,14 +3,16 @@ import asyncio
 import json
 import time
 from datetime import datetime
-from nicegui import events, ui
+from pathlib import Path
+
+from nicegui import app, events, ui
 
 try:
     from icons import SVG_PATHS
 except Exception:
     SVG_PATHS = {f"btn{i}": "M500 100l100 800h-200z" for i in range(1, 16)}
 
-# Configurable video source (static file or URL)
+# Fallback-видео, если для услуги нет файла в static/tutorials/
 VIDEO_SRC = "/static/promo.mp4"
 
 gc.collect()
@@ -59,6 +61,17 @@ SERVICE_NAMES = {
     "btn6": "TURBO", "btn7": "SHAMPOO", "btn8": "POLISH", "btn9": "STEAM", "btn10": "VACUUM",
     "btn11": "WHEELS", "btn12": "DRY", "btn13": "SMELL", "btn14": "WASH"
 }
+
+# Готово под ролики: static/tutorials/btn2.mp4 … btn14.mp4 (имя = id кнопки). FOAM — assets/foam.mp4.
+TUTORIAL_VIDEO_BY_SERVICE = {bid: f"/static/tutorials/{bid}.mp4" for bid in SERVICE_NAMES}
+TUTORIAL_VIDEO_BY_SERVICE["btn1"] = "/assets/foam.mp4"
+
+app.add_static_files("/assets", str(Path(__file__).resolve().parent / "assets"))
+
+BUTTONS_DATA = [
+    "btn1", "btn2", "btn3", "btn4", "btn5", "btn6", "btn7", "btn8",
+    "btn9", "btn10", "btn11", "btn12", "btn13", "btn14", "btn_pause",
+]
 
 # --- TRANSLATIONS (ENG, RUS, UZB) ---
 LANGS = ["eng", "rus", "uzb"]
@@ -235,6 +248,12 @@ def clear_notifications():
 
 bell_btn_ref = [None]
 bell_pressed_timer_ref = [None]
+layout_compact_state = [False]
+main_stage_ref = [None]
+buttons_grid_ref = [None]
+right_rail_ref = [None]
+bell_fixed_host_ref = [None]
+last_tutorial_video_key = [None]
 
 def set_bell_pressed_state(on: bool):
     btn = bell_btn_ref[0]
@@ -254,13 +273,13 @@ def send_bell_signal():
 
 def video_play_pause():
     ui.run_javascript(
-        "const v=document.getElementById('promoVideo');"
+        "const v=document.getElementById('tutorialVideo');"
         "if(v){if(v.paused){v.play()}else{v.pause()}}"
     )
 
 def video_restart():
     ui.run_javascript(
-        "const v=document.getElementById('promoVideo');"
+        "const v=document.getElementById('tutorialVideo');"
         "if(v){v.currentTime=0;v.play()}"
     )
 
@@ -295,6 +314,98 @@ def get_current_price_per_second():
         return 0.0
     ppm = float(service_config[bid]["price_per_min"])
     return (ppm / 60.0) if ppm > 0 else 0.0
+
+
+def get_display_seconds_float() -> float:
+    if (
+        not is_paused[0]
+        and active_btn_id[0]
+        and remaining_seconds[0] > 0
+        and billing_phase_start[0] is not None
+    ):
+        elapsed = time.monotonic() - billing_phase_start[0]
+        return max(0.0, float(remaining_seconds[0]) - elapsed)
+    return float(max(0, remaining_seconds[0]))
+
+
+def get_tutorial_video_url(bid: str | None) -> str:
+    if not bid or bid == 'btn_pause':
+        return VIDEO_SRC
+    return TUTORIAL_VIDEO_BY_SERVICE.get(bid, VIDEO_SRC)
+
+
+def should_use_compact_layout() -> bool:
+    """Узкий столбец кнопок справа + видео в центре: есть услуга, время и ненулевой баланс (или тариф 0)."""
+    bid = active_btn_id[0]
+    if not bid or bid == 'btn_pause':
+        return False
+    if remaining_seconds[0] <= 0:
+        return False
+    ppm = float(service_config.get(bid, {}).get('price_per_min', 0) or 0)
+    rate = (ppm / 60.0) if ppm > 0 else 0.0
+    display_sec_float = get_display_seconds_float()
+    money = int(display_sec_float * rate + 1e-6) if rate > 0 else 0
+    if rate > 0 and money <= 0:
+        return False
+    return True
+
+
+def _sync_tutorial_video() -> None:
+    if not layout_compact_state[0]:
+        return
+    bid = active_btn_id[0]
+    url = get_tutorial_video_url(bid)
+    key = (bid, url)
+    if last_tutorial_video_key[0] == key:
+        return
+    last_tutorial_video_key[0] = key
+    ui.run_javascript(f"""
+        (function() {{
+            const v = document.getElementById('tutorialVideo');
+            if (!v) return;
+            const url = {json.dumps(url)};
+            v.src = url;
+            v.muted = true;
+            v.playsInline = true;
+            v.load();
+            v.play().catch(function() {{}});
+        }})();
+    """)
+
+
+def update_compact_layout() -> None:
+    want = should_use_compact_layout()
+    ms = main_stage_ref[0]
+    bg = buttons_grid_ref[0]
+    rr = right_rail_ref[0]
+    bell_btn_el = bell_btn_ref[0]
+    bf = bell_fixed_host_ref[0]
+    if not ms or not bg or not rr or not bell_btn_el or not bf:
+        return
+    state_changed = want != layout_compact_state[0]
+    if state_changed:
+        layout_compact_state[0] = want
+        if want:
+            last_tutorial_video_key[0] = None
+            ms.classes(remove='layout-idle', add='layout-active')
+            for bid in BUTTONS_DATA:
+                if bid in btns:
+                    btns[bid].move(rr, -1)
+            bell_btn_el.move(rr, -1)
+            bell_btn_el.classes(remove='bell-btn--large', add='bell-btn--small')
+        else:
+            ms.classes(remove='layout-active', add='layout-idle')
+            bell_btn_el.move(bf, -1)
+            for bid in BUTTONS_DATA:
+                if bid in btns:
+                    btns[bid].move(bg, -1)
+            bell_btn_el.classes(remove='bell-btn--small', add='bell-btn--large')
+            last_tutorial_video_key[0] = None
+            ui.run_javascript(
+                "const v=document.getElementById('tutorialVideo');if(v){v.pause();}"
+            )
+    if want:
+        _sync_tutorial_video()
 
 
 def bonus_multiplier():
@@ -345,16 +456,7 @@ def update_price_bar():
 
 def update_ui():
     if 'main_display' not in globals(): return
-    if (
-        not is_paused[0]
-        and active_btn_id[0]
-        and remaining_seconds[0] > 0
-        and billing_phase_start[0] is not None
-    ):
-        elapsed = time.monotonic() - billing_phase_start[0]
-        display_sec_float = max(0.0, float(remaining_seconds[0]) - elapsed)
-    else:
-        display_sec_float = float(max(0, remaining_seconds[0]))
+    display_sec_float = get_display_seconds_float()
     sec = max(0, int(display_sec_float))
     minutes = sec // 60
     seconds = sec % 60
@@ -372,6 +474,7 @@ def update_ui():
         main_display.set_text(formatted_money)
         main_unit.set_text(currency_code[0])
         sub_display.set_text(time_str)
+    update_compact_layout()
 
 async def timer_loop():
     dt = 0.05
@@ -612,21 +715,58 @@ def main_page():
     .side-menu { position: fixed; top: 0; left: -280px; width: 280px; height: 100vh; background: #080c14; border-right: 2px solid var(--primary); z-index: 2000; display: flex; flex-direction: column; padding: 40px 20px; }
     .menu-visible { left: 0 !important; }
     .drawer-handle { display: none !important; }
-    .bell-btn { border: 1px solid rgba(248, 250, 252, 0.3); color: #facc15; padding: clamp(10px, 2.5vw, 18px); font-size: clamp(22px, 5vmin, 36px); min-width: clamp(44px, 10vmin, 56px); min-height: clamp(44px, 10vmin, 56px); }
+    .bell-host--fixed { position: fixed; top: 50%; right: 20px; transform: translateY(-50%); z-index: 90; display: flex; align-items: center; justify-content: center; }
+    .bell-btn { border: 1px solid rgba(248, 250, 252, 0.3); color: #facc15; border-radius: 18%; }
+    .bell-btn--large { padding: clamp(10px, 2.5vw, 18px); font-size: clamp(22px, 5vmin, 36px); min-width: clamp(44px, 10vmin, 56px); min-height: clamp(44px, 10vmin, 56px); }
+    .bell-btn--small { padding: 0 !important; min-width: var(--btn-size) !important; min-height: var(--btn-size) !important; width: var(--btn-size) !important; height: var(--btn-size) !important; font-size: clamp(14px, 3vmin, 22px) !important; }
     .bell-pressed { background: #22c55e; color: #020617 !important; box-shadow: 0 0 12px rgba(34,197,94,0.7); }
     .price-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3000; background: var(--primary); color: var(--bg); padding: clamp(6px, 1.2vw, 12px) clamp(12px, 3vw, 24px); font-size: clamp(1.2vmin, 2vw, 2vmin); font-weight: 900; border-radius: 0 0 10px 10px; display: flex; align-items: center; gap: 8px; max-width: min(95vw, 420px); flex-wrap: wrap; justify-content: center; }
     .price-bar-icon-wrap { width: clamp(20px, 4vw, 28px); height: clamp(20px, 4vw, 28px); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
     .price-bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
     .price-bar-hidden { visibility: hidden; opacity: 0; pointer-events: none; }
     .price-bar-visible { visibility: visible; opacity: 1; }
-    .custom-display { position: fixed; top: 20px; right: 0; z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-radius: 25px 0 0 25px; padding: clamp(12px, 2vw, 18px) clamp(24px, 4vw, 40px); display: flex; flex-direction: column; align-items: flex-end; }
+    .custom-display { position: fixed; top: 0; right: 0; margin-top: 0; z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-radius: 25px 0 0 25px; padding: max(0px, env(safe-area-inset-top, 0px)) clamp(24px, 4vw, 40px) clamp(12px, 2vw, 18px); display: flex; flex-direction: column; align-items: flex-end; }
     .main-val { color: #00f2ff; font-size: clamp(4vmin, 6.2vmin, 8vmin); font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; white-space: nowrap; }
     .main-unit { font-size: clamp(1.5vmin, 2vw, 2vmin); color: var(--primary); margin-left: 6px; }
     .sub-info { color: #94a3b8; font-size: clamp(1.6vmin, 2.2vmin, 2.5vmin); margin-top: 4px; }
-    .grid-wrapper { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; padding: 80px 0 80px; }
+    .main-stage { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: row; align-items: stretch; justify-content: center; padding: 80px 0 80px; box-sizing: border-box; min-height: 0; }
+    /* stretch — и центр, и правая колонка на всю высоту экрана (минус padding main-stage) */
+    .main-stage.layout-active { justify-content: flex-start; align-items: stretch; padding: 72px 4px 12px 10px; min-height: 0; }
+    /* column: иначе при layout-active один ребёнок (видео) в row не растягивается — «квадратик» слева */
+    .center-pane { flex: 1 1 0; display: flex; flex-direction: column; align-items: stretch; justify-content: center; min-width: 0; min-height: 0; position: relative; }
+    .main-stage.layout-active .center-pane { align-self: stretch; }
+    .tutorial-video-wrap { display: none; width: 100%; flex: 0 0 auto; align-items: center; justify-content: center; padding: 8px 16px; box-sizing: border-box; }
+    .layout-active .tutorial-video-wrap { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; }
+    .tutorial-video-el { width: 601px; height: 500px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.22); background: #000; object-fit: contain; }
+    .idle-buttons-cluster { width: 100%; flex: 0 0 auto; }
+    .layout-idle .idle-buttons-cluster { display: flex; align-items: center; justify-content: center; }
+    .layout-active .idle-buttons-cluster { display: none !important; }
+    .right-rail {
+      display: none;
+      flex: 0 0 auto;
+      flex-shrink: 0;
+      box-sizing: border-box;
+      z-index: 90;
+      align-self: stretch;
+      min-height: 0;
+      --btn-size: clamp(50px, 9.5vmin, 112px);
+      grid-template-columns: repeat(2, var(--btn-size));
+      grid-auto-rows: min-content;
+      gap: clamp(0.9vmin, 1.6vmin, 2vmin);
+      column-gap: clamp(1vmin, 1.8vmin, 2.2vmin);
+      align-content: start;
+      justify-items: center;
+      /* сверху отступ под блок таймера; справа вплотную к краю окна */
+      padding: clamp(108px, 15vh, 168px) 6px 12px 8px;
+      padding-right: max(4px, env(safe-area-inset-right, 0px));
+      margin-right: 0;
+      overflow-x: hidden;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .layout-active .right-rail { display: grid; }
+    .layout-active .right-rail .bell-rail-cell { justify-self: center; margin-top: 0; }
     .screen-center { width: 100%; display: flex; justify-content: center; align-items: center; }
-    .video-bottom-wrap { position: fixed; bottom: 16px; right: 16px; z-index: 80; max-width: clamp(260px, 30vw, 420px); }
-    .video-bottom { width: 100%; height: auto; border-radius: 10px; border: 1px solid rgba(255,255,255,0.25); object-fit: cover; background: #000; display: block; }
     .buttons-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--btn-size), 1fr)); gap: clamp(1.5vmin, 2.5vmin, 3vmin); max-width: min(95vw, calc(5 * var(--btn-size) + 4 * 2.5vmin)); } 
     .action-btn { width: var(--btn-size); height: var(--btn-size); border-radius: 18%; background: #1e293b; border: 1px solid rgba(255, 255, 255, 0.1); color: #64748b; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; }
     .active-yellow { border: 2.5px solid var(--primary) !important; color: white !important; }
@@ -852,9 +992,15 @@ def main_page():
     # Global Q — must go through NiceGUI so menu state and DOM stay in sync (raw JS toggle was unreliable).
     ui.keyboard(on_key=_menu_hotkey, ignore=['input', 'textarea', 'select'])
 
-    # --- Bell (admin call) center-right ---
-    with ui.element('div').classes('fixed z-[110]').style('top: 50%; right: 20px; transform: translateY(-50%);'):
-        bell_btn_ref[0] = ui.button(icon='notifications_active').props('flat round').classes('bell-btn').on('click', send_bell_signal)
+    layout_compact_state[0] = False
+    last_tutorial_video_key[0] = None
+
+    # --- Bell: в обычном режиме — справа по вертикали по центру; в режиме мойки — в одной строке с Старт/Стоп, размер как у кнопок
+    bell_fixed_host_ref[0] = ui.element('div').classes('bell-host bell-host--fixed')
+    with bell_fixed_host_ref[0]:
+        bell_btn_ref[0] = ui.button(icon='notifications_active').props('flat round').classes(
+            'bell-btn bell-btn--large bell-rail-cell'
+        ).on('click', send_bell_signal)
 
     # --- Price bar (always visible when service selected) ---
     with ui.row().classes('price-bar price-bar-hidden').style('align-items: center;') as price_bar:
@@ -874,33 +1020,36 @@ def main_page():
             main_unit = ui.label('').classes('main-unit ml-2')
         sub_display = ui.label('').classes('sub-info')
 
-    # --- СЕТКА ---
-    BUTTONS_DATA = [
-        "btn1", "btn2", "btn3", "btn4", "btn5", "btn6", "btn7", "btn8",
-        "btn9", "btn10", "btn11", "btn12", "btn13", "btn14", "btn_pause"
-    ]
-    with ui.element('div').classes('grid-wrapper'):
-        with ui.element('div').classes('screen-center'):
-            with ui.element('div').classes('buttons-grid'):
-                for bid in BUTTONS_DATA:
-                    btn = ui.element('div').classes('action-btn icon-idle')
-                    btn.on('click', lambda e, b=bid: handle_click(b))
-                    with btn:
-                        if bid == 'btn_pause':
-                            pause_refs['svg'] = ui.html('')
-                            pause_refs['label'] = ui.label(t('start')).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
-                        else:
-                            path = SVG_PATHS.get(bid)
-                            if not path:
-                                path = "M500 200a300 300 0 1 0 0.001 0z"
-                            ui.html(f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>')
-                            lbl = ui.label(t(bid)).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
-                            grid_label_refs[bid] = lbl
-                    btns[bid] = btn
-
-    # --- Bottom-right video button ---
-    with ui.element('div').classes('video-bottom-wrap'):
-        ui.button(icon='ondemand_video').props('round fab color=primary').classes('shadow-lg')
+    # --- Центр: сетка кнопок (простой) ИЛИ видео-туториал; справа — одна колонка кнопок в режиме активной мойки
+    with ui.element('div').classes('main-stage layout-idle') as main_stage:
+        main_stage_ref[0] = main_stage
+        with ui.element('div').classes('center-pane'):
+            with ui.element('div').classes('tutorial-video-wrap'):
+                ui.html(
+                    f'<video id="tutorialVideo" class="tutorial-video-el" muted playsinline loop '
+                    f'preload="metadata" src={json.dumps(VIDEO_SRC)}></video>',
+                    sanitize=False,
+                )
+            with ui.element('div').classes('idle-buttons-cluster'):
+                with ui.element('div').classes('screen-center'):
+                    with ui.element('div').classes('buttons-grid') as buttons_grid:
+                        buttons_grid_ref[0] = buttons_grid
+                        for bid in BUTTONS_DATA:
+                            btn = ui.element('div').classes('action-btn icon-idle')
+                            btn.on('click', lambda e, b=bid: handle_click(b))
+                            with btn:
+                                if bid == 'btn_pause':
+                                    pause_refs['svg'] = ui.html('')
+                                    pause_refs['label'] = ui.label(t('start')).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
+                                else:
+                                    path = SVG_PATHS.get(bid)
+                                    if not path:
+                                        path = "M500 200a300 300 0 1 0 0.001 0z"
+                                    ui.html(f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>')
+                                    lbl = ui.label(t(bid)).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
+                                    grid_label_refs[bid] = lbl
+                            btns[bid] = btn
+        right_rail_ref[0] = ui.element('div').classes('right-rail')
 
     update_ui()
     update_price_bar()
