@@ -254,6 +254,9 @@ buttons_grid_ref = [None]
 right_rail_ref = [None]
 bell_fixed_host_ref = [None]
 last_tutorial_video_key = [None]
+header_idle_video_wrap_ref = [None]
+custom_display_root_ref = [None]
+_header_idle_video_last_shown = [None]
 
 def set_bell_pressed_state(on: bool):
     btn = bell_btn_ref[0]
@@ -406,6 +409,33 @@ def update_compact_layout() -> None:
             )
     if want:
         _sync_tutorial_video()
+    sync_header_idle_video()
+
+
+def sync_header_idle_video(force: bool = False):
+    """Промо-ролик в шапке: только пока нет активной мойки (до compact layout)."""
+    show = not layout_compact_state[0]
+    if not force and _header_idle_video_last_shown[0] == show:
+        return
+    _header_idle_video_last_shown[0] = show
+    w = header_idle_video_wrap_ref[0]
+    root = custom_display_root_ref[0]
+    if w:
+        w.set_visibility(show)
+    if root:
+        if show:
+            root.classes(remove='custom-display--timer-only', add='custom-display--with-idle-video')
+        else:
+            root.classes(remove='custom-display--with-idle-video', add='custom-display--timer-only')
+    if show:
+        ui.run_javascript(
+            "const v=document.getElementById('headerIdleVideo');"
+            "if(v){v.muted=true;v.playsInline=true;v.play().catch(function(){});}"
+        )
+    else:
+        ui.run_javascript(
+            "const v=document.getElementById('headerIdleVideo');if(v){v.pause();v.currentTime=0;}"
+        )
 
 
 def bonus_multiplier():
@@ -717,19 +747,102 @@ def main_page():
     .drawer-handle { display: none !important; }
     .bell-host--fixed { position: fixed; top: 50%; right: 20px; transform: translateY(-50%); z-index: 90; display: flex; align-items: center; justify-content: center; }
     .bell-btn { border: 1px solid rgba(248, 250, 252, 0.3); color: #facc15; border-radius: 18%; }
-    .bell-btn--large { padding: clamp(10px, 2.5vw, 18px); font-size: clamp(22px, 5vmin, 36px); min-width: clamp(44px, 10vmin, 56px); min-height: clamp(44px, 10vmin, 56px); }
+    .bell-btn--large {
+      padding: 0;
+      box-sizing: border-box;
+      width: 60px !important;
+      height: 60px !important;
+      min-width: 60px !important;
+      min-height: 60px !important;
+      max-width: 60px !important;
+      max-height: 60px !important;
+      font-size: clamp(22px, 5vmin, 36px);
+    }
     .bell-btn--small { padding: 0 !important; min-width: var(--btn-size) !important; min-height: var(--btn-size) !important; width: var(--btn-size) !important; height: var(--btn-size) !important; font-size: clamp(14px, 3vmin, 22px) !important; }
+    .bell-btn .q-icon { width: 34px !important; height: 27px !important; font-size: 27px !important; }
     .bell-pressed { background: #22c55e; color: #020617 !important; box-shadow: 0 0 12px rgba(34,197,94,0.7); }
     .price-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3000; background: var(--primary); color: var(--bg); padding: clamp(6px, 1.2vw, 12px) clamp(12px, 3vw, 24px); font-size: clamp(1.2vmin, 2vw, 2vmin); font-weight: 900; border-radius: 0 0 10px 10px; display: flex; align-items: center; gap: 8px; max-width: min(95vw, 420px); flex-wrap: wrap; justify-content: center; }
     .price-bar-icon-wrap { width: clamp(20px, 4vw, 28px); height: clamp(20px, 4vw, 28px); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
     .price-bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
     .price-bar-hidden { visibility: hidden; opacity: 0; pointer-events: none; }
     .price-bar-visible { visibility: visible; opacity: 1; }
-    .custom-display { position: fixed; top: 0; right: 0; margin-top: 0; z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-radius: 25px 0 0 25px; padding: max(0px, env(safe-area-inset-top, 0px)) clamp(24px, 4vw, 40px) clamp(12px, 2vw, 18px); display: flex; flex-direction: column; align-items: flex-end; }
+    .custom-display {
+      position: fixed; top: 0; left: 0; right: 0; width: 100%; max-width: 100%; margin-top: 0; box-sizing: border-box;
+      z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-top: none;
+      border-radius: 0;
+      padding: 0 max(12px, env(safe-area-inset-right, 0px)) clamp(10px, 1.5vw, 14px) max(12px, env(safe-area-inset-left, 0px));
+      padding-top: max(0px, env(safe-area-inset-top, 0px));
+      display: flex; flex-direction: column; align-items: stretch; gap: 0;
+    }
+    /* Промо в шапке на всю ширину: без скруглений, таймер скрыт */
+    .custom-display.custom-display--with-idle-video .custom-display-meta {
+      display: none !important;
+    }
+    .custom-display--with-idle-video .custom-display-top { gap: 0; }
+    /* Только таймер: полоса на всю ширину, без скруглений; блок времени справа */
+    .custom-display.custom-display--timer-only {
+      left: 0 !important;
+      right: 0 !important;
+      width: 100% !important;
+      max-width: 100% !important;
+      border-radius: 0;
+      padding: max(0px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) clamp(10px, 1.5vw, 14px) max(12px, env(safe-area-inset-left, 0px));
+      align-items: stretch;
+    }
+    .custom-display--timer-only .custom-display-top {
+      width: 100% !important;
+      justify-content: flex-end !important;
+    }
+    .custom-display--timer-only .header-idle-video-wrap {
+      display: none !important;
+      flex: 0 0 0 !important;
+      width: 0 !important;
+      min-width: 0 !important;
+      height: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      overflow: hidden !important;
+      border: none !important;
+    }
+    .custom-display--timer-only .custom-display-meta { display: flex !important; }
+    .custom-display-top {
+      width: 100%;
+      align-items: flex-start !important;
+      flex-wrap: nowrap !important;
+      gap: 12px;
+    }
+    /* Видео растягивается от левого края до таймера */
+    .header-idle-video-wrap {
+      flex: 1 1 0;
+      min-width: 0;
+      width: auto;
+      overflow: hidden;
+      border-radius: 0;
+      background: #000;
+      align-self: flex-start;
+    }
+    .header-idle-video-el {
+      width: 100%;
+      height: 104px;
+      max-height: 104px;
+      display: block;
+      object-fit: cover;
+      vertical-align: top;
+    }
+    .custom-display-meta {
+      display: flex; flex-direction: column; align-items: flex-end; text-align: right;
+      flex: 0 0 auto;
+      min-width: 0;
+      padding: 4px 0 4px 4px;
+      box-sizing: border-box;
+    }
+    .custom-display .items-baseline { justify-content: flex-end; width: 100%; flex-wrap: wrap; }
+    .custom-display .sub-info { align-self: flex-end; margin-top: 2px; }
     .main-val { color: #00f2ff; font-size: clamp(4vmin, 6.2vmin, 8vmin); font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; white-space: nowrap; }
     .main-unit { font-size: clamp(1.5vmin, 2vw, 2vmin); color: var(--primary); margin-left: 6px; }
     .sub-info { color: #94a3b8; font-size: clamp(1.6vmin, 2.2vmin, 2.5vmin); margin-top: 4px; }
     .main-stage { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: row; align-items: stretch; justify-content: center; padding: 80px 0 80px; box-sizing: border-box; min-height: 0; }
+    .main-stage.layout-idle { padding-top: clamp(130px, 20vh, 200px); }
     /* stretch — и центр, и правая колонка на всю высоту экрана (минус padding main-stage) */
     .main-stage.layout-active { justify-content: flex-start; align-items: stretch; padding: 72px 4px 12px 10px; min-height: 0; }
     /* column: иначе при layout-active один ребёнок (видео) в row не растягивается — «квадратик» слева */
@@ -1014,11 +1127,22 @@ def main_page():
         display_mode[0] = 1 if display_mode[0] == 0 else 0
         update_ui()
 
-    with ui.element('div').classes('custom-display cursor-pointer').on('click', swap_display):
-        with ui.row().classes('items-baseline'):
-            main_display = ui.label('').classes('main-val')
-            main_unit = ui.label('').classes('main-unit ml-2')
-        sub_display = ui.label('').classes('sub-info')
+    _cd_root = ui.element('div').classes('custom-display custom-display--with-idle-video')
+    custom_display_root_ref[0] = _cd_root
+    with _cd_root:
+        with ui.row().classes('custom-display-top w-full items-start'):
+            header_idle_video_wrap_ref[0] = ui.element('div').classes('header-idle-video-wrap')
+            with header_idle_video_wrap_ref[0]:
+                ui.html(
+                    f'<video id="headerIdleVideo" class="header-idle-video-el" muted playsinline loop '
+                    f'preload="metadata" src={json.dumps(VIDEO_SRC)}></video>',
+                    sanitize=False,
+                )
+            with ui.element('div').classes('custom-display-meta cursor-pointer').on('click', swap_display):
+                with ui.row().classes('items-baseline'):
+                    main_display = ui.label('').classes('main-val')
+                    main_unit = ui.label('').classes('main-unit ml-2')
+                sub_display = ui.label('').classes('sub-info')
 
     # --- Центр: сетка кнопок (простой) ИЛИ видео-туториал; справа — одна колонка кнопок в режиме активной мойки
     with ui.element('div').classes('main-stage layout-idle') as main_stage:
@@ -1054,6 +1178,7 @@ def main_page():
     update_ui()
     update_price_bar()
     update_pause_visuals()
+    sync_header_idle_video(force=True)
 
 ui.run(
     fullscreen=True,   # полноэкранный режим
