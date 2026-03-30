@@ -761,7 +761,26 @@ def main_page():
     .bell-btn--small { padding: 0 !important; min-width: var(--btn-size) !important; min-height: var(--btn-size) !important; width: var(--btn-size) !important; height: var(--btn-size) !important; font-size: clamp(14px, 3vmin, 22px) !important; }
     .bell-btn .q-icon { width: 34px !important; height: 27px !important; font-size: 27px !important; }
     .bell-pressed { background: #22c55e; color: #020617 !important; box-shadow: 0 0 12px rgba(34,197,94,0.7); }
-    .price-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 3000; background: var(--primary); color: var(--bg); padding: clamp(6px, 1.2vw, 12px) clamp(12px, 3vw, 24px); font-size: clamp(1.2vmin, 2vw, 2vmin); font-weight: 900; border-radius: 0 0 10px 10px; display: flex; align-items: center; gap: 8px; max-width: min(95vw, 420px); flex-wrap: wrap; justify-content: center; }
+    /* Под полосой таймера (.custom-display), не перекрывает её */
+    .price-bar {
+      position: fixed;
+      top: calc(env(safe-area-inset-top, 0px) + clamp(92px, 13vh, 120px));
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 3000;
+      background: var(--primary);
+      color: var(--bg);
+      padding: clamp(6px, 1.2vw, 12px) clamp(12px, 3vw, 24px);
+      font-size: clamp(1.2vmin, 2vw, 2vmin);
+      font-weight: 900;
+      border-radius: 0 0 10px 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      max-width: min(95vw, 420px);
+      flex-wrap: wrap;
+      justify-content: center;
+    }
     .price-bar-icon-wrap { width: clamp(20px, 4vw, 28px); height: clamp(20px, 4vw, 28px); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
     .price-bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
     .price-bar-hidden { visibility: hidden; opacity: 0; pointer-events: none; }
@@ -779,7 +798,7 @@ def main_page():
       display: none !important;
     }
     .custom-display--with-idle-video .custom-display-top { gap: 0; }
-    /* Только таймер: полоса на всю ширину, без скруглений; блок времени справа */
+    /* Только таймер: полоса на всю ширину, без скруглений; время и баланс по центру */
     .custom-display.custom-display--timer-only {
       left: 0 !important;
       right: 0 !important;
@@ -791,8 +810,14 @@ def main_page():
     }
     .custom-display--timer-only .custom-display-top {
       width: 100% !important;
-      justify-content: flex-end !important;
+      justify-content: center !important;
     }
+    .custom-display--timer-only .custom-display-meta {
+      align-items: center !important;
+      text-align: center !important;
+    }
+    .custom-display--timer-only .items-baseline { justify-content: center !important; }
+    .custom-display--timer-only .sub-info { align-self: center !important; }
     .custom-display--timer-only .header-idle-video-wrap {
       display: none !important;
       flex: 0 0 0 !important;
@@ -844,7 +869,7 @@ def main_page():
     .main-stage { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: row; align-items: stretch; justify-content: center; padding: 80px 0 80px; box-sizing: border-box; min-height: 0; }
     .main-stage.layout-idle { padding-top: clamp(130px, 20vh, 200px); }
     /* stretch — и центр, и правая колонка на всю высоту экрана (минус padding main-stage) */
-    .main-stage.layout-active { justify-content: flex-start; align-items: stretch; padding: 72px 4px 12px 10px; min-height: 0; }
+    .main-stage.layout-active { justify-content: flex-start; align-items: stretch; padding: clamp(100px, 14vh, 152px) 4px 12px 10px; min-height: 0; }
     /* column: иначе при layout-active один ребёнок (видео) в row не растягивается — «квадратик» слева */
     .center-pane { flex: 1 1 0; display: flex; flex-direction: column; align-items: stretch; justify-content: center; min-width: 0; min-height: 0; position: relative; }
     .main-stage.layout-active .center-pane { align-self: stretch; }
@@ -869,8 +894,8 @@ def main_page():
       column-gap: clamp(1vmin, 1.8vmin, 2.2vmin);
       align-content: start;
       justify-items: center;
-      /* сверху отступ под блок таймера; справа вплотную к краю окна */
-      padding: clamp(108px, 15vh, 168px) 6px 12px 8px;
+      /* сверху: таймер + жёлтая плашка режима (price-bar ниже таймера) */
+      padding: clamp(160px, 22vh, 220px) 6px 12px 8px;
       padding-right: max(4px, env(safe-area-inset-right, 0px));
       margin-right: 0;
       overflow-x: hidden;
