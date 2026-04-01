@@ -1,9 +1,11 @@
 import gc
 import asyncio
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from nicegui import app, events, ui
 
@@ -62,19 +64,16 @@ SERVICE_NAMES = {
     "btn11": "WHEELS", "btn12": "DRY", "btn13": "SMELL", "btn14": "WASH"
 }
 
-# Видимость кнопок услуг (btn_pause всегда видна)
-service_button_visible = {bid: True for bid in SERVICE_NAMES}
+# Порядок кнопок услуг на сетке (без паузы); названия на экране: service_display_names или перевод t(bid)
+service_button_order = list(SERVICE_NAMES.keys())
+service_display_names: dict[str, str] = {}
+service_button_visible = {bid: True for bid in service_button_order}
 
 # Готово под ролики: static/tutorials/btn2.mp4 … btn14.mp4 (имя = id кнопки). FOAM — assets/foam.mp4.
 TUTORIAL_VIDEO_BY_SERVICE = {bid: f"/static/tutorials/{bid}.mp4" for bid in SERVICE_NAMES}
 TUTORIAL_VIDEO_BY_SERVICE["btn1"] = "/assets/foam.mp4"
 
 app.add_static_files("/assets", str(Path(__file__).resolve().parent / "assets"))
-
-BUTTONS_DATA = [
-    "btn1", "btn2", "btn3", "btn4", "btn5", "btn6", "btn7", "btn8",
-    "btn9", "btn10", "btn11", "btn12", "btn13", "btn14", "btn_pause",
-]
 
 # --- TRANSLATIONS (ENG, RUS, UZB) ---
 LANGS = ["eng", "rus", "uzb"]
@@ -105,6 +104,11 @@ TRANSLATIONS = {
         "disp_services": "Service buttons on the grid",
         "disp_hint": "Uncheck to hide. Pause is always shown.",
         "disp_saved": "Display settings saved",
+        "menu_services": "Services", "tab_services": "SERVICES (NAMES)",
+        "services_hint": "Custom title on the main screen. Empty field = use language pack name. Add = full button like the others (price, timer, revenue).",
+        "services_save_names": "Apply titles", "service_add": "Add service",
+        "new_service_name": "New service", "services_min_one": "At least one service is required",
+        "services_order_note": "Technical id (video: static/tutorials/<id>.mp4)",
     },
     "rus": {
         "menu_lang": "Язык", "menu_qr": "QR", "menu_cash": "Касса", "menu_info": "Инфо", "tab_lang_title": "Язык",
@@ -130,6 +134,11 @@ TRANSLATIONS = {
         "disp_services": "Кнопки услуг в сетке",
         "disp_hint": "Снимите галочку, чтобы скрыть. Пауза всегда видна.",
         "disp_saved": "Настройки экрана сохранены",
+        "menu_services": "Услуги", "tab_services": "УСЛУГИ (НАЗВАНИЯ)",
+        "services_hint": "Свой заголовок на главном экране. Пустое поле — имя из языка. Добавить — полноценная кнопка (цена, таймер, выручка).",
+        "services_save_names": "Применить названия", "service_add": "Добавить услугу",
+        "new_service_name": "Новая услуга", "services_min_one": "Нужна хотя бы одна услуга",
+        "services_order_note": "Технический id (ролик static/tutorials/<id>.mp4)",
     },
     "uzb": {
         "menu_lang": "Til", "menu_qr": "QR", "menu_cash": "Kassa", "menu_info": "Ma'lumot", "tab_lang_title": "Til",
@@ -155,15 +164,59 @@ TRANSLATIONS = {
         "disp_services": "Xizmat tugmalari panjarada",
         "disp_hint": "Yashirish uchun belgini olib tashlang. Pauza har doim ko'rinadi.",
         "disp_saved": "Displey sozlamalari saqlandi",
+        "menu_services": "Xizmatlar", "tab_services": "XIZMATLAR (NOMLAR)",
+        "services_hint": "Asosiy ekrandagi sarlavha. Bo'sh = til paketidagi nom. Qo'shish — to'liq tugma (narx, taymer, daromad).",
+        "services_save_names": "Nomlarni qo'llash", "service_add": "Xizmat qo'shish",
+        "new_service_name": "Yangi xizmat", "services_min_one": "Kamida bitta xizmat kerak",
+        "services_order_note": "Texnik id (video static/tutorials/<id>.mp4)",
     },
 }
 
 def t(key):
     return TRANSLATIONS.get(current_lang[0], TRANSLATIONS["eng"]).get(key, key)
 
+def service_label(bid: str) -> str:
+    custom = (service_display_names.get(bid) or "").strip()
+    if custom:
+        return custom
+    return t(bid)
+
+def iter_service_ids():
+    return list(service_button_order)
+
+def all_grid_button_ids():
+    return list(service_button_order) + ["btn_pause"]
+
+def next_service_button_id() -> str:
+    mx = 0
+    for bid in service_button_order:
+        m = re.match(r"^btn(\d+)$", bid)
+        if m:
+            mx = max(mx, int(m.group(1)))
+    return f"btn{mx + 1}"
+
+def ensure_service_slot(bid: str) -> None:
+    if not bid or bid == "btn_pause":
+        return
+    if bid not in service_config:
+        base = SERVICE_NAMES.get(bid, bid)
+        ppm = 500
+        service_config[bid] = {
+            "name": base,
+            "price_per_min": ppm,
+            "price_per_second": ppm / 60,
+        }
+    if bid not in service_revenue:
+        service_revenue[bid] = 0.0
+    if bid not in service_button_visible:
+        service_button_visible[bid] = True
+    if bid not in TUTORIAL_VIDEO_BY_SERVICE:
+        TUTORIAL_VIDEO_BY_SERVICE[bid] = f"/static/tutorials/{bid}.mp4"
+
 def set_lang(lang):
     current_lang[0] = lang
     refresh_all_ui_text()
+    save_app_state()
 
 def _set_el_text(el, text):
     if not el:
@@ -177,17 +230,17 @@ def refresh_all_ui_text():
     for key, el in ui_refs.items():
         _set_el_text(el, t(key))
     for bid, el in revenue_name_refs.items():
-        _set_el_text(el, t(bid))
+        _set_el_text(el, service_label(bid))
     for bid, el in info_name_refs.items():
-        _set_el_text(el, t(bid))
+        _set_el_text(el, service_label(bid))
     for el in price_per_min_refs:
         _set_el_text(el, t('price_per_min'))
     for el in save_btn_refs:
         _set_el_text(el, t('save'))
     for bid, el in grid_label_refs.items():
-        _set_el_text(el, t(bid))
+        _set_el_text(el, service_label(bid))
     for bid, el in display_svc_checkbox_refs.items():
-        _set_el_text(el, t(bid))
+        _set_el_text(el, service_label(bid))
     update_pause_visuals()
     update_price_bar()
     update_ui()
@@ -200,6 +253,14 @@ price_per_min_refs = []  # labels "Price / minute"
 save_btn_refs = []       # SAVE buttons in INFO tab
 grid_label_refs = {}   # bid -> label for service names in button grid
 display_svc_checkbox_refs = {}  # bid -> checkbox on Display settings tab
+cash_rows_host_ref = [None]
+info_cards_host_ref = [None]
+display_checks_host_ref = [None]
+services_editor_host_ref = [None]
+total_revenue_label_ref = [None]
+revenue_value_labels: dict[str, Any] = {}
+services_name_inputs: dict[str, Any] = {}
+service_editor_live_values: dict[str, str] = {}
 
 # --- СИСТЕМНАЯ ЛОГИКА ---
 DEFAULT_SESSION_SECONDS = 30 * 60
@@ -232,7 +293,7 @@ def start_session_if_needed():
 def switch_service(bid):
     active_btn_id[0] = bid
     refresh_button_visuals()
-    notify(f"{t('selected')} {t(bid)}")
+    notify(f"{t('selected')} {service_label(bid)}")
     update_price_bar()
 
 def _sync_running_phase():
@@ -321,7 +382,8 @@ price_bar_label_ref = [None]
 # --- SERVICE CONFIGURATION ---
 def init_service_config():
     default_config = {}
-    for bid, name in SERVICE_NAMES.items():
+    for bid in service_button_order:
+        name = SERVICE_NAMES.get(bid, bid)
         price_per_min = 500
         default_config[bid] = {
             "name": name,
@@ -333,7 +395,7 @@ def init_service_config():
 service_config = init_service_config()
 
 # --- REVENUE TRACKING ---
-service_revenue = {bid: 0.0 for bid in SERVICE_NAMES.keys()}
+service_revenue = {bid: 0.0 for bid in service_button_order}
 
 PATH_PAUSE = "M200 200h200v600h-200zM600 200h200v600h-200z" 
 PATH_PLAY = "M300 200l500 300-500 300z" 
@@ -419,7 +481,7 @@ def update_compact_layout() -> None:
         if want:
             last_tutorial_video_key[0] = None
             ms.classes(remove='layout-idle', add='layout-active')
-            for bid in BUTTONS_DATA:
+            for bid in all_grid_button_ids():
                 if bid in btns:
                     btns[bid].move(rr, -1)
             bell_btn_el.move(rr, -1)
@@ -427,7 +489,7 @@ def update_compact_layout() -> None:
         else:
             ms.classes(remove='layout-active', add='layout-idle')
             bell_btn_el.move(bf, -1)
-            for bid in BUTTONS_DATA:
+            for bid in all_grid_button_ids():
                 if bid in btns:
                     btns[bid].move(bg, -1)
             bell_btn_el.classes(remove='bell-btn--small', add='bell-btn--large')
@@ -521,6 +583,216 @@ def apply_service_button_visibility():
         el.set_visibility(bool(service_button_visible.get(bid, True)))
 
 
+def action_dynamic_service(bid: str):
+    print(f"{service_label(bid)} ({bid})")
+
+
+def repopulate_buttons_grid():
+    bg = buttons_grid_ref[0]
+    if not bg:
+        return
+    bg.clear()
+    btns.clear()
+    pause_refs.clear()
+    grid_label_refs.clear()
+    with bg:
+        for bid in all_grid_button_ids():
+            btn = ui.element('div').classes('action-btn icon-idle')
+            btn.on('click', lambda e, b=bid: handle_click(b))
+            with btn:
+                if bid == 'btn_pause':
+                    pause_refs['svg'] = ui.html('')
+                    pause_refs['label'] = ui.label(t('start')).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
+                else:
+                    path = get_svg_path(bid)
+                    ui.html(f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>')
+                    lbl = ui.label(service_label(bid)).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
+                    grid_label_refs[bid] = lbl
+            btns[bid] = btn
+    refresh_button_visuals()
+    update_pause_visuals()
+    apply_service_button_visibility()
+
+
+def update_revenue_display():
+    tr = total_revenue_label_ref[0]
+    if not tr:
+        return
+    total = 0.0
+    for bid in iter_service_ids():
+        revenue = float(service_revenue.get(bid, 0.0))
+        total += revenue
+        lab = revenue_value_labels.get(bid)
+        if lab:
+            lab.set_text(f"{format_money(revenue)} UZS")
+    tr.set_text(f"{format_money(total)} UZS")
+
+
+def repopulate_cash_tab_rows():
+    host = cash_rows_host_ref[0]
+    if not host:
+        return
+    host.clear()
+    revenue_name_refs.clear()
+    revenue_value_labels.clear()
+    with host:
+        for bid in iter_service_ids():
+            with ui.row().classes('w-full justify-between items-center mb-3 p-2').style('background: #1e293b; border-radius: 8px;'):
+                nl = ui.label(service_label(bid)).classes('text-white font-bold')
+                revenue_name_refs[bid] = nl
+                revenue_value_labels[bid] = ui.label('0 UZS').classes('text-yellow-500 font-bold')
+
+
+def repopulate_info_price_cards():
+    host = info_cards_host_ref[0]
+    if not host:
+        return
+    host.clear()
+    info_name_refs.clear()
+    price_per_min_refs.clear()
+    save_btn_refs.clear()
+    price_inputs: dict[str, Any] = {}
+    with host:
+        for bid in iter_service_ids():
+            config = service_config[bid]
+            with ui.card().classes('w-full mb-3').style('background: #1e293b;'):
+                nl = ui.label(service_label(bid)).classes('text-yellow-500 font-bold mb-2')
+                info_name_refs[bid] = nl
+                pl = ui.label(t('price_per_min')).classes('text-white text-sm mb-1')
+                price_per_min_refs.append(pl)
+                price_input = ui.input(
+                    label='',
+                    value=str(int(config["price_per_min"])),
+                    placeholder='UZS/min',
+                ).props('outlined dense autocomplete=off').classes('w-full menu-admin-input')
+                price_inputs[bid] = price_input
+
+                def make_save_handler(b):
+                    def save():
+                        try:
+                            raw = str(price_inputs[b].value or '').strip().replace(',', '.')
+                            price_per_min = int(float(raw or 0))
+                            if price_per_min <= 0:
+                                ui.notify(t('price_positive'), color='red')
+                                return
+                            update_service_config(b, price_per_min)
+                            save_app_state()
+                            ui.notify(f"{service_label(b)} {t('config_saved')}", color='green')
+                        except Exception:
+                            ui.notify(t('invalid_input'), color='red')
+                    return save
+
+                save_el = ui.button(t('save'), on_click=make_save_handler(bid)).classes('w-full mt-2').props('color=primary')
+                save_btn_refs.append(save_el)
+
+
+def repopulate_display_visibility_checks():
+    host = display_checks_host_ref[0]
+    if not host:
+        return
+    host.clear()
+    display_svc_checkbox_refs.clear()
+    with host:
+        for bid in iter_service_ids():
+            def _make_svc_handler(b):
+                def _on_svc(e):
+                    service_button_visible[b] = bool(e.value)
+                    save_app_state()
+                    apply_service_button_visibility()
+                return _on_svc
+
+            cb = ui.checkbox(
+                service_label(bid),
+                value=service_button_visible.get(bid, True),
+                on_change=_make_svc_handler(bid),
+            ).props('dense').classes('text-white text-xs mb-1')
+            display_svc_checkbox_refs[bid] = cb
+
+
+def repopulate_services_editor():
+    host = services_editor_host_ref[0]
+    if not host:
+        return
+    host.clear()
+    services_name_inputs.clear()
+    service_editor_live_values.clear()
+    with host:
+        for bid in iter_service_ids():
+            with ui.row().classes('w-full items-center gap-2 mb-2 flex-nowrap'):
+                ui.label(bid).classes('text-gray-500 text-xs shrink-0').style('min-width: 52px; max-width: 72px')
+                cur = (service_display_names.get(bid) or '').strip()
+
+                def _track(b):
+                    def _on(e):
+                        service_editor_live_values[b] = str(e.value if e.value is not None else '')
+                    return _on
+
+                inp = ui.input(
+                    label='',
+                    value=cur,
+                    placeholder=t(bid),
+                    on_change=_track(bid),
+                ).props('outlined dense').classes('flex-grow menu-admin-input')
+                services_name_inputs[bid] = inp
+                service_editor_live_values[bid] = cur
+                ui.button(icon='delete').props('flat round dense color=red').on(
+                    'click', lambda _, b=bid: remove_service(b)
+                )
+
+
+def save_service_names_from_editor():
+    for bid, inp in list(services_name_inputs.items()):
+        if bid in service_editor_live_values:
+            v = str(service_editor_live_values[bid] or '').strip()
+        elif inp is not None:
+            v = str(inp.value or '').strip()
+        else:
+            v = ''
+        if v:
+            service_display_names[bid] = v
+        else:
+            service_display_names.pop(bid, None)
+    save_app_state()
+    repopulate_all_dynamic_ui()
+
+
+def add_service_to_order():
+    nid = next_service_button_id()
+    service_button_order.append(nid)
+    ensure_service_slot(nid)
+    service_display_names[nid] = t('new_service_name')
+    save_app_state()
+    repopulate_all_dynamic_ui()
+    ui.notify(t('config_saved'), color='green')
+
+
+def remove_service(bid: str):
+    if len(service_button_order) <= 1:
+        ui.notify(t('services_min_one'), color='red')
+        return
+    if active_btn_id[0] == bid:
+        stop_everything()
+    service_button_order.remove(bid)
+    service_display_names.pop(bid, None)
+    service_button_visible.pop(bid, None)
+    service_config.pop(bid, None)
+    service_revenue.pop(bid, None)
+    TUTORIAL_VIDEO_BY_SERVICE.pop(bid, None)
+    save_app_state()
+    repopulate_all_dynamic_ui()
+
+
+def repopulate_all_dynamic_ui():
+    repopulate_buttons_grid()
+    repopulate_cash_tab_rows()
+    repopulate_info_price_cards()
+    repopulate_display_visibility_checks()
+    repopulate_services_editor()
+    refresh_all_ui_text()
+    update_revenue_display()
+    update_ui()
+
+
 def update_price_bar():
     bar, icon_el, label_el = price_bar_ref[0], price_bar_icon_ref[0], price_bar_label_ref[0]
     if not bar or not label_el:
@@ -530,7 +802,7 @@ def update_price_bar():
         bar.classes(remove="price-bar-visible", add="price-bar-hidden")
         return
     bar.classes(remove="price-bar-hidden", add="price-bar-visible")
-    name = t(bid)
+    name = service_label(bid)
     price = service_config[bid]["price_per_min"]
     path = get_svg_path(bid)
     svg = f'<svg width="28" height="28" viewBox="0 0 1000 1000" style="fill:#020617; display:block;"><path d="{path}"/></svg>'
@@ -626,6 +898,8 @@ def handle_click(bid):
     action = BUTTON_ACTIONS.get(bid)
     if action:
         action()
+    else:
+        action_dynamic_service(bid)
 
     if bid not in service_config:
         return
@@ -695,7 +969,7 @@ def update_service_config(bid, price_per_min):
         return
     service_config[bid]["price_per_min"] = price_per_min
     service_config[bid]["price_per_second"] = price_per_min / 60 if price_per_min > 0 else 0
-    notify(f"Price changed: {SERVICE_NAMES.get(bid, '')} — {price_per_min} UZS/min")
+    notify(f"Price changed: {service_label(bid)} — {price_per_min} UZS/min")
     update_price_bar()
     update_ui()
 
@@ -717,7 +991,13 @@ def build_app_state():
         "bonus_percent": float(bonus_percent[0]),
         "header_show_timer": bool(header_show_timer[0]),
         "header_show_balance": bool(header_show_balance[0]),
-        "service_button_visible": {bid: bool(service_button_visible.get(bid, True)) for bid in SERVICE_NAMES},
+        "service_button_order": list(service_button_order),
+        "service_display_names": dict(service_display_names),
+        "service_button_visible": {
+            bid: bool(service_button_visible.get(bid, True)) for bid in service_button_order
+        },
+        "lang": current_lang[0],
+        "display_mode": int(display_mode[0]),
     }
 
 def save_app_state():
@@ -736,8 +1016,35 @@ def _apply_loaded_state(state_json: str):
     except Exception:
         return
 
+    lg = data.get("lang")
+    if isinstance(lg, str) and lg in LANGS:
+        current_lang[0] = lg
+    try:
+        dm = int(data.get("display_mode", 0))
+        display_mode[0] = 0 if dm == 0 else 1
+    except Exception:
+        pass
+
+    order = data.get("service_button_order")
+    if isinstance(order, list) and order:
+        clean = []
+        for x in order:
+            if isinstance(x, str) and x != "btn_pause" and x.startswith("btn"):
+                clean.append(x)
+        if clean:
+            service_button_order[:] = clean
+    names = data.get("service_display_names")
+    if isinstance(names, dict):
+        service_display_names.clear()
+        for k, v in names.items():
+            if isinstance(k, str) and isinstance(v, str) and v.strip():
+                service_display_names[k] = v.strip()
+    for bid in service_button_order:
+        ensure_service_slot(bid)
+
     prices = data.get("prices_per_min", {})
     for bid, val in prices.items():
+        ensure_service_slot(bid)
         if bid in service_config:
             try:
                 ppm = float(val)
@@ -748,6 +1055,7 @@ def _apply_loaded_state(state_json: str):
 
     revenues = data.get("revenues", {})
     for bid, val in revenues.items():
+        ensure_service_slot(bid)
         if bid in service_revenue:
             try:
                 service_revenue[bid] = float(val)
@@ -766,18 +1074,27 @@ def _apply_loaded_state(state_json: str):
     header_show_balance[0] = bool(data.get("header_show_balance", True))
     vis = data.get("service_button_visible")
     if isinstance(vis, dict):
-        for bid in SERVICE_NAMES:
+        for bid in service_button_order:
             if bid in vis:
                 try:
                     service_button_visible[bid] = bool(vis[bid])
                 except Exception:
                     pass
 
-def load_app_state():
-    # NiceGUI version in this project does not support result callbacks from run_javascript,
-    # so we safely skip loading here to avoid runtime errors.
-    # App will start with default prices and revenues.
-    pass
+async def load_app_state():
+    try:
+        raw = await ui.run_javascript(
+            f'return localStorage.getItem({json.dumps(LOCAL_STORAGE_KEY)});',
+            timeout=5.0,
+        )
+    except Exception:
+        return
+    if raw is None:
+        return
+    s = str(raw).strip()
+    if not s or s in ('undefined', 'null'):
+        return
+    _apply_loaded_state(s)
 
 tab_contents = {}
 
@@ -787,7 +1104,7 @@ def show_tab(tab_name):
         content.set_visibility(tab_id == tab_name)
 
 @ui.page('/')
-def main_page():
+async def main_page():
     global main_display, main_unit, sub_display, left_panel, tab_contents
     btns.clear()
     pause_refs.clear()
@@ -798,8 +1115,11 @@ def main_page():
     save_btn_refs.clear()
     grid_label_refs.clear()
     display_svc_checkbox_refs.clear()
+    services_name_inputs.clear()
+    service_editor_live_values.clear()
+    revenue_value_labels.clear()
     ui_refs.clear()
-    load_app_state()
+    await load_app_state()
 
     ui.timer(0, timer_loop, once=True)
 
@@ -1043,6 +1363,13 @@ def main_page():
                     lbl = ui.label(t('menu_info')).classes('text-white text-sm font-bold')
                     ui_refs['menu_info'] = lbl
 
+            services_menu_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('services'))
+            with services_menu_btn:
+                with ui.row().classes('items-center w-full'):
+                    ui.icon('tune', color='yellow-500', size='24px').classes('mr-4')
+                    lbl = ui.label(t('menu_services')).classes('text-white text-sm font-bold')
+                    ui_refs['menu_services'] = lbl
+
             bonus_menu_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('bonus'))
             with bonus_menu_btn:
                 with ui.row().classes('items-center w-full'):
@@ -1072,29 +1399,13 @@ def main_page():
                 tab_contents['cash'] = cash_tab
                 lbl = ui.label(t('tab_revenue')).classes('text-yellow-500 font-bold mb-4 text-center').style('font-size: 14px')
                 ui_refs['tab_revenue'] = lbl
-                
-                revenue_labels = {}
-                for bid in SERVICE_NAMES.keys():
-                    with ui.row().classes('w-full justify-between items-center mb-3 p-2').style('background: #1e293b; border-radius: 8px;'):
-                        nl = ui.label(t(bid)).classes('text-white font-bold')
-                        revenue_name_refs[bid] = nl
-                        revenue_labels[bid] = ui.label('0 UZS').classes('text-yellow-500 font-bold')
-                
+                cash_rows_host_ref[0] = ui.column().classes('w-full')
                 ui.separator().classes('my-4')
                 with ui.row().classes('w-full justify-between items-center p-3').style('background: #0f172a; border: 2px solid var(--primary); border-radius: 8px;'):
                     tl = ui.label(t('total')).classes('text-white font-bold text-lg')
                     ui_refs['total'] = tl
-                    total_revenue_label = ui.label('0 UZS').classes('text-yellow-500 font-bold text-lg')
-                
-                def update_revenue_display():
-                    total = 0
-                    for bid in SERVICE_NAMES.keys():
-                        revenue = service_revenue[bid]
-                        total += revenue
-                        if bid in revenue_labels:
-                            revenue_labels[bid].set_text(f"{format_money(revenue)} UZS")
-                    total_revenue_label.set_text(f"{format_money(total)} UZS")
-                
+                    trl = ui.label('0 UZS').classes('text-yellow-500 font-bold text-lg')
+                    total_revenue_label_ref[0] = trl
                 ui.timer(1.0, update_revenue_display)
             
             # Language Tab
@@ -1114,43 +1425,7 @@ def main_page():
                 tab_contents['info'] = info_tab
                 lbl = ui.label(t('tab_price')).classes('text-yellow-500 font-bold mb-4 text-center').style('font-size: 14px')
                 ui_refs['tab_price'] = lbl
-                
-                price_inputs = {}
-                price_name_refs = {}
-                
-                for bid in SERVICE_NAMES.keys():
-                    config = service_config[bid]
-                    
-                    with ui.card().classes('w-full mb-3').style('background: #1e293b;'):
-                        nl = ui.label(t(bid)).classes('text-yellow-500 font-bold mb-2')
-                        info_name_refs[bid] = nl
-
-                        pl = ui.label(t('price_per_min')).classes('text-white text-sm mb-1')
-                        price_per_min_refs.append(pl)
-                        price_input = ui.input(
-                            label='',
-                            value=str(int(config["price_per_min"])),
-                            placeholder='UZS/min',
-                        ).props('outlined dense autocomplete=off').classes('w-full menu-admin-input')
-                        price_inputs[bid] = price_input
-                        
-                        def make_save_handler(bid):
-                            def save():
-                                try:
-                                    raw = str(price_inputs[bid].value or '').strip().replace(',', '.')
-                                    price_per_min = int(float(raw or 0))
-                                    if price_per_min <= 0:
-                                        ui.notify(t('price_positive'), color='red')
-                                        return
-                                    update_service_config(bid, price_per_min)
-                                    save_app_state()
-                                    ui.notify(f"{t(bid)} {t('config_saved')}", color='green')
-                                except Exception:
-                                    ui.notify(t('invalid_input'), color='red')
-                            return save
-                        
-                        save_btn = ui.button(t('save'), on_click=make_save_handler(bid)).classes('w-full mt-2').props('color=primary')
-                        save_btn_refs.append(save_btn)
+                info_cards_host_ref[0] = ui.column().classes('w-full')
 
             # Bonus tab (admin — Q menu)
             with ui.column().classes('w-full') as bonus_tab:
@@ -1232,21 +1507,19 @@ def main_page():
                 ).classes('text-white text-sm mb-4')
 
                 ui_refs['disp_services'] = ui.label(t('disp_services')).classes('text-yellow-500 font-bold mb-2 text-sm')
-                for bid in SERVICE_NAMES:
-                    def _make_svc_handler(b):
-                        def _on_svc(e):
-                            service_button_visible[b] = bool(e.value)
-                            save_app_state()
-                            apply_service_button_visibility()
+                display_checks_host_ref[0] = ui.column().classes('w-full')
 
-                        return _on_svc
-
-                    cb = ui.checkbox(
-                        t(bid),
-                        value=service_button_visible.get(bid, True),
-                        on_change=_make_svc_handler(bid),
-                    ).props('dense').classes('text-white text-xs mb-1')
-                    display_svc_checkbox_refs[bid] = cb
+            # Услуги: названия, добавление
+            with ui.column().classes('w-full') as services_tab:
+                services_tab.set_visibility(False)
+                tab_contents['services'] = services_tab
+                ui_refs['tab_services'] = ui.label(t('tab_services')).classes('text-yellow-500 font-bold mb-2 text-center').style('font-size: 14px')
+                ui_refs['services_hint'] = ui.label(t('services_hint')).classes('text-gray-400 text-xs mb-2')
+                ui_refs['services_order_note'] = ui.label(t('services_order_note')).classes('text-gray-500 text-xs mb-2')
+                services_editor_host_ref[0] = ui.column().classes('w-full')
+                with ui.row().classes('w-full gap-2 mt-2'):
+                    ui.button(t('services_save_names'), on_click=save_service_names_from_editor).classes('flex-grow').props('color=primary')
+                    ui.button(t('service_add'), on_click=add_service_to_order).classes('flex-grow').props('outline')
 
     # Global Q — must go through NiceGUI so menu state and DOM stay in sync (raw JS toggle was unreliable).
     ui.keyboard(on_key=_menu_hotkey, ignore=['input', 'textarea', 'select'])
@@ -1271,6 +1544,7 @@ def main_page():
     # --- Timer display ---
     def swap_display():
         display_mode[0] = 1 if display_mode[0] == 0 else 0
+        save_app_state()
         update_ui()
 
     _cd_root = ui.element('div').classes('custom-display custom-display--with-idle-video')
@@ -1308,27 +1582,15 @@ def main_page():
                 with ui.element('div').classes('screen-center'):
                     with ui.element('div').classes('buttons-grid') as buttons_grid:
                         buttons_grid_ref[0] = buttons_grid
-                        for bid in BUTTONS_DATA:
-                            btn = ui.element('div').classes('action-btn icon-idle')
-                            btn.on('click', lambda e, b=bid: handle_click(b))
-                            with btn:
-                                if bid == 'btn_pause':
-                                    pause_refs['svg'] = ui.html('')
-                                    pause_refs['label'] = ui.label(t('start')).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
-                                else:
-                                    path = SVG_PATHS.get(bid)
-                                    if not path:
-                                        path = "M500 200a300 300 0 1 0 0.001 0z"
-                                    ui.html(f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>')
-                                    lbl = ui.label(t(bid)).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
-                                    grid_label_refs[bid] = lbl
-                            btns[bid] = btn
         right_rail_ref[0] = ui.element('div').classes('right-rail')
 
-    update_ui()
-    update_price_bar()
-    update_pause_visuals()
-    apply_service_button_visibility()
+    repopulate_buttons_grid()
+    repopulate_cash_tab_rows()
+    repopulate_info_price_cards()
+    repopulate_display_visibility_checks()
+    repopulate_services_editor()
+    refresh_all_ui_text()
+    update_revenue_display()
     sync_header_idle_video(force=True)
 
 ui.run(
