@@ -58,6 +58,7 @@ BUTTON_ACTIONS = {
 }
 
 # --- SERVICE MAPPING ---
+# Здесь прописывай названия для каждой кнопки
 SERVICE_NAMES = {
     "btn1": "FOAM", "btn2": "WAX", "btn3": "WATER", "btn4": "AIR", "btn5": "OSMOS",
     "btn6": "TURBO", "btn7": "SHAMPOO", "btn8": "POLISH", "btn9": "STEAM", "btn10": "VACUUM",
