@@ -62,6 +62,9 @@ SERVICE_NAMES = {
     "btn11": "WHEELS", "btn12": "DRY", "btn13": "SMELL", "btn14": "WASH"
 }
 
+# Видимость кнопок услуг (btn_pause всегда видна)
+service_button_visible = {bid: True for bid in SERVICE_NAMES}
+
 # Готово под ролики: static/tutorials/btn2.mp4 … btn14.mp4 (имя = id кнопки). FOAM — assets/foam.mp4.
 TUTORIAL_VIDEO_BY_SERVICE = {bid: f"/static/tutorials/{bid}.mp4" for bid in SERVICE_NAMES}
 TUTORIAL_VIDEO_BY_SERVICE["btn1"] = "/assets/foam.mp4"
@@ -96,6 +99,12 @@ TRANSLATIONS = {
         "bonus_label": "Bonus (%)", "bonus_hint": "Extra +(bonus)% on top-up only (пополнение). Not applied to per-second wash billing.",
         "bonus_saved": "Bonus saved", "pause_saved": "Free pause saved",
         "topup_done": "Top-up applied", "topup_need_service": "Select a wash mode first",
+        "menu_display": "Display", "tab_display": "MAIN SCREEN",
+        "disp_show_timer": "Show countdown (time) in header",
+        "disp_show_balance": "Show balance (UZS) in header",
+        "disp_services": "Service buttons on the grid",
+        "disp_hint": "Uncheck to hide. Pause is always shown.",
+        "disp_saved": "Display settings saved",
     },
     "rus": {
         "menu_lang": "Язык", "menu_qr": "QR", "menu_cash": "Касса", "menu_info": "Инфо", "tab_lang_title": "Язык",
@@ -115,6 +124,12 @@ TRANSLATIONS = {
         "bonus_label": "Бонус (%)", "bonus_hint": "Доп. +(бонус)% только при пополнении. К посекундной мойке не относится.",
         "bonus_saved": "Бонус сохранён", "pause_saved": "Пауза сохранена",
         "topup_done": "Пополнение выполнено", "topup_need_service": "Сначала выберите режим",
+        "menu_display": "Экран", "tab_display": "ГЛАВНЫЙ ЭКРАН",
+        "disp_show_timer": "Показывать таймер в шапке",
+        "disp_show_balance": "Показывать баланс (UZS) в шапке",
+        "disp_services": "Кнопки услуг в сетке",
+        "disp_hint": "Снимите галочку, чтобы скрыть. Пауза всегда видна.",
+        "disp_saved": "Настройки экрана сохранены",
     },
     "uzb": {
         "menu_lang": "Til", "menu_qr": "QR", "menu_cash": "Kassa", "menu_info": "Ma'lumot", "tab_lang_title": "Til",
@@ -134,6 +149,12 @@ TRANSLATIONS = {
         "bonus_label": "Bonus (%)", "bonus_hint": "Faqat to'ldirishda +(bonus)% qo'shimcha. Sekundlik yuvish tarifiga ta'sir qilmaydi.",
         "bonus_saved": "Bonus saqlandi", "pause_saved": "Pauza saqlandi",
         "topup_done": "To'ldirildi", "topup_need_service": "Avval rejimni tanlang",
+        "menu_display": "Displey", "tab_display": "ASOSIY EKRAN",
+        "disp_show_timer": "Sarlavhada taymerni ko'rsatish",
+        "disp_show_balance": "Sarlavhada balans (UZS) ko'rsatish",
+        "disp_services": "Xizmat tugmalari panjarada",
+        "disp_hint": "Yashirish uchun belgini olib tashlang. Pauza har doim ko'rinadi.",
+        "disp_saved": "Displey sozlamalari saqlandi",
     },
 }
 
@@ -165,6 +186,8 @@ def refresh_all_ui_text():
         _set_el_text(el, t('save'))
     for bid, el in grid_label_refs.items():
         _set_el_text(el, t(bid))
+    for bid, el in display_svc_checkbox_refs.items():
+        _set_el_text(el, t(bid))
     update_pause_visuals()
     update_price_bar()
     update_ui()
@@ -176,6 +199,7 @@ info_name_refs = {}    # bid -> label for INFO tab service names
 price_per_min_refs = []  # labels "Price / minute"
 save_btn_refs = []       # SAVE buttons in INFO tab
 grid_label_refs = {}   # bid -> label for service names in button grid
+display_svc_checkbox_refs = {}  # bid -> checkbox on Display settings tab
 
 # --- СИСТЕМНАЯ ЛОГИКА ---
 DEFAULT_SESSION_SECONDS = 30 * 60
@@ -192,7 +216,11 @@ btns, pause_refs = {}, {}
 # N=0: pause until user presses Start.
 free_pause_seconds = [0]
 bonus_percent = [0.0]
+header_show_timer = [True]
+header_show_balance = [True]
 pause_started_at = [None]
+timer_row_ref = [None]
+custom_display_meta_ref = [None]
 # Smooth countdown: bill every 1s via accumulator; display interpolates within current second
 bill_accumulator = [0.0]
 billing_phase_start = [None]  # monotonic() at start of current displayed second slice (when running)
@@ -467,6 +495,32 @@ def apply_topup(money_uzs: float = 0.0, seconds: int = 0):
     update_ui()
     ui.notify(t('topup_done'), color='green')
 
+def apply_header_display_visibility():
+    """Показ строк таймера и баланса в шапке по галочкам (учитывает display_mode swap)."""
+    tr = timer_row_ref[0]
+    meta = custom_display_meta_ref[0]
+    if not tr or "sub_display" not in globals() or sub_display is None:
+        return
+    st = bool(header_show_timer[0])
+    sb = bool(header_show_balance[0])
+    if meta:
+        meta.set_visibility(st or sb)
+    if display_mode[0] == 0:
+        tr.set_visibility(st)
+        sub_display.set_visibility(sb)
+    else:
+        tr.set_visibility(sb)
+        sub_display.set_visibility(st)
+
+
+def apply_service_button_visibility():
+    for bid, el in btns.items():
+        if bid == "btn_pause":
+            el.set_visibility(True)
+            continue
+        el.set_visibility(bool(service_button_visible.get(bid, True)))
+
+
 def update_price_bar():
     bar, icon_el, label_el = price_bar_ref[0], price_bar_icon_ref[0], price_bar_label_ref[0]
     if not bar or not label_el:
@@ -504,6 +558,7 @@ def update_ui():
         main_display.set_text(formatted_money)
         main_unit.set_text(currency_code[0])
         sub_display.set_text(time_str)
+    apply_header_display_visibility()
     update_compact_layout()
 
 async def timer_loop():
@@ -660,6 +715,9 @@ def build_app_state():
         },
         "free_pause_seconds": int(free_pause_seconds[0]),
         "bonus_percent": float(bonus_percent[0]),
+        "header_show_timer": bool(header_show_timer[0]),
+        "header_show_balance": bool(header_show_balance[0]),
+        "service_button_visible": {bid: bool(service_button_visible.get(bid, True)) for bid in SERVICE_NAMES},
     }
 
 def save_app_state():
@@ -704,6 +762,16 @@ def _apply_loaded_state(state_json: str):
         bonus_percent[0] = max(0.0, float(data.get("bonus_percent", 0)))
     except Exception:
         pass
+    header_show_timer[0] = bool(data.get("header_show_timer", True))
+    header_show_balance[0] = bool(data.get("header_show_balance", True))
+    vis = data.get("service_button_visible")
+    if isinstance(vis, dict):
+        for bid in SERVICE_NAMES:
+            if bid in vis:
+                try:
+                    service_button_visible[bid] = bool(vis[bid])
+                except Exception:
+                    pass
 
 def load_app_state():
     # NiceGUI version in this project does not support result callbacks from run_javascript,
@@ -729,6 +797,7 @@ def main_page():
     price_per_min_refs.clear()
     save_btn_refs.clear()
     grid_label_refs.clear()
+    display_svc_checkbox_refs.clear()
     ui_refs.clear()
     load_app_state()
 
@@ -987,6 +1056,13 @@ def main_page():
                     ui.icon('timer', color='yellow-500', size='24px').classes('mr-4')
                     lbl = ui.label(t('menu_free_pause')).classes('text-white text-sm font-bold')
                     ui_refs['menu_free_pause'] = lbl
+
+            display_menu_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('display'))
+            with display_menu_btn:
+                with ui.row().classes('items-center w-full'):
+                    ui.icon('visibility', color='yellow-500', size='24px').classes('mr-4')
+                    lbl = ui.label(t('menu_display')).classes('text-white text-sm font-bold')
+                    ui_refs['menu_display'] = lbl
         
         # Tab content containers
         with ui.column().classes('w-full mt-4').style('max-height: calc(100vh - 200px); overflow-y: auto;') as tab_container:
@@ -1127,6 +1203,51 @@ def main_page():
 
                 ui.button(t('save'), on_click=save_free_pause).classes('w-full mt-3').props('color=primary')
 
+            # Display: видимость таймера, баланса и кнопок услуг
+            with ui.column().classes('w-full') as display_tab:
+                display_tab.set_visibility(False)
+                tab_contents['display'] = display_tab
+                ui_refs['tab_display'] = ui.label(t('tab_display')).classes('text-yellow-500 font-bold mb-2 text-center').style('font-size: 14px')
+                ui_refs['disp_hint'] = ui.label(t('disp_hint')).classes('text-gray-400 text-xs mb-3')
+
+                def _on_timer_vis(e):
+                    header_show_timer[0] = bool(e.value)
+                    save_app_state()
+                    apply_header_display_visibility()
+
+                def _on_balance_vis(e):
+                    header_show_balance[0] = bool(e.value)
+                    save_app_state()
+                    apply_header_display_visibility()
+
+                ui_refs['disp_show_timer'] = ui.checkbox(
+                    t('disp_show_timer'),
+                    value=header_show_timer[0],
+                    on_change=_on_timer_vis,
+                ).classes('text-white text-sm mb-1')
+                ui_refs['disp_show_balance'] = ui.checkbox(
+                    t('disp_show_balance'),
+                    value=header_show_balance[0],
+                    on_change=_on_balance_vis,
+                ).classes('text-white text-sm mb-4')
+
+                ui_refs['disp_services'] = ui.label(t('disp_services')).classes('text-yellow-500 font-bold mb-2 text-sm')
+                for bid in SERVICE_NAMES:
+                    def _make_svc_handler(b):
+                        def _on_svc(e):
+                            service_button_visible[b] = bool(e.value)
+                            save_app_state()
+                            apply_service_button_visibility()
+
+                        return _on_svc
+
+                    cb = ui.checkbox(
+                        t(bid),
+                        value=service_button_visible.get(bid, True),
+                        on_change=_make_svc_handler(bid),
+                    ).props('dense').classes('text-white text-xs mb-1')
+                    display_svc_checkbox_refs[bid] = cb
+
     # Global Q — must go through NiceGUI so menu state and DOM stay in sync (raw JS toggle was unreliable).
     ui.keyboard(on_key=_menu_hotkey, ignore=['input', 'textarea', 'select'])
 
@@ -1163,8 +1284,12 @@ def main_page():
                     f'preload="metadata" src={json.dumps(VIDEO_SRC)}></video>',
                     sanitize=False,
                 )
-            with ui.element('div').classes('custom-display-meta cursor-pointer').on('click', swap_display):
-                with ui.row().classes('items-baseline'):
+            meta_el = ui.element('div').classes('custom-display-meta cursor-pointer').on('click', swap_display)
+            custom_display_meta_ref[0] = meta_el
+            with meta_el:
+                tr_el = ui.row().classes('items-baseline')
+                timer_row_ref[0] = tr_el
+                with tr_el:
                     main_display = ui.label('').classes('main-val')
                     main_unit = ui.label('').classes('main-unit ml-2')
                 sub_display = ui.label('').classes('sub-info')
@@ -1203,6 +1328,7 @@ def main_page():
     update_ui()
     update_price_bar()
     update_pause_visuals()
+    apply_service_button_visibility()
     sync_header_idle_video(force=True)
 
 ui.run(
