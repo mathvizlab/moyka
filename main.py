@@ -5,7 +5,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from nicegui import app, events, ui
 
@@ -422,7 +422,7 @@ def get_display_seconds_float() -> float:
     return float(max(0, remaining_seconds[0]))
 
 
-def get_tutorial_video_url(bid: str | None) -> str:
+def get_tutorial_video_url(bid: Optional[str]) -> str:
     if not bid or bid == 'btn_pause':
         return VIDEO_SRC
     return TUTORIAL_VIDEO_BY_SERVICE.get(bid, VIDEO_SRC)
