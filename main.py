@@ -1,29 +1,112 @@
+from __future__ import annotations
+
 import gc
 import asyncio
 import json
 import os
 import re
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Union
 
-from nicegui import app, events, ui
+from nicegui import app, context, events, ui
+
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+ASSETS_DIR = BASE_DIR / "assets"
 
 try:
     from icons import SVG_PATHS
 except Exception:
     SVG_PATHS = {f"btn{i}": "M500 100l100 800h-200z" for i in range(1, 16)}
 
-# Fallback-видео, если для услуги нет файла в static/tutorials/
-VIDEO_SRC = "/static/promo.mp4"
 
+def _ensure_static_dir() -> None:
+    if STATIC_DIR.is_dir():
+        return
+    try:
+        STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as err:
+        print(f"[moyka] static: не удалось создать {STATIC_DIR}: {err}", flush=True)
+
+
+_ensure_static_dir()
+app.add_static_files("/static", str(STATIC_DIR))
+app.add_static_files("/assets", str(ASSETS_DIR))
+
+
+def _resolved_promo_video_url() -> str:
+    promo = STATIC_DIR / "promo.mp4"
+    if promo.is_file():
+        return "/static/promo.mp4"
+    print(f"[moyka] нет файла {promo} — шапка без промо-ролика", flush=True)
+    return ""
+
+
+VIDEO_SRC = _resolved_promo_video_url()
 gc.collect()
+
+# Сетевой запуск (Debian / kiosk / Radxa): при необходимости NICEGUI_HOST / NICEGUI_PORT
+APP_HOST = os.environ.get("NICEGUI_HOST", "0.0.0.0")
+try:
+    APP_PORT = int(os.environ.get("NICEGUI_PORT", "8080"))
+except ValueError:
+    APP_PORT = 8080
+
+
+def _client_deleted() -> bool:
+    """Страница/клиент уже снят с момента закрытия вкладки."""
+    try:
+        c = context.client
+    except RuntimeError:
+        return True
+    return bool(getattr(c, "_deleted", False))
+
+
+def _client_ok() -> bool:
+    """Можно слать WebSocket/JS (сокет поднят)."""
+    if _client_deleted():
+        return False
+    try:
+        c = context.client
+    except RuntimeError:
+        return False
+    return bool(c.has_socket_connection)
+
+
+def _run_js_safe(code: str) -> None:
+    if not _client_ok():
+        return
+    try:
+        ui.run_javascript(code)
+    except Exception:
+        pass
+
+
+def _media_url_or_fallback(url: str, fallback: str) -> str:
+    if not url:
+        return fallback
+    if url.startswith("/static/"):
+        rel = url[len("/static/") :]
+        p = STATIC_DIR / rel
+        if p.is_file():
+            return url
+        print(f"[moyka] нет медиа: {p}", flush=True)
+        return fallback
+    if url.startswith("/assets/"):
+        rel = url[len("/assets/") :]
+        p = ASSETS_DIR / rel
+        if p.is_file():
+            return url
+        print(f"[moyka] нет медиа: {p}", flush=True)
+        return fallback
+    return url
+
 
 def get_svg_path(bid):
     return SVG_PATHS.get(bid) or "M500 200a300 300 0 1 0 0.001 0z"
-# s
+
 # --- БЛОК ФУНКЦИЙ ДЛЯ КАЖДОЙ КНОПК
 # Здесь прописывай логику для каждой кнопк отдельно
 def action_btn1(): print("FOAM (Пена) запущена")
@@ -75,8 +158,6 @@ service_button_visible = {bid: True for bid in service_button_order}
 # Готово под ролики: static/tutorials/btn2.mp4 … btn14.mp4 (имя = id кнопки). FOAM — assets/foam.mp4.
 TUTORIAL_VIDEO_BY_SERVICE = {bid: f"/static/tutorials/{bid}.mp4" for bid in SERVICE_NAMES}
 TUTORIAL_VIDEO_BY_SERVICE["btn1"] = "/assets/foam.mp4"
-
-app.add_static_files("/assets", str(Path(__file__).resolve().parent / "assets"))
 
 # --- TRANSLATIONS (ENG, RUS, UZB) ---
 LANGS = ["eng", "rus", "uzb"]
@@ -273,7 +354,6 @@ is_paused = [True]
 display_mode = [0]  # 0 = TIME big, 1 = MONEY big
 currency_code = ["UZS"]
 menu_open = [False]
-current_tab = [None]
 btns, pause_refs = {}, {}
 # Q → menu: admin-adjustable
 # Free pause N>0: after user presses Pause, wash is frozen N seconds only, then auto-resumes (same service, timer + money flow).
@@ -321,6 +401,8 @@ def notify(text):
     _refresh_notifications_ui()
 
 def _refresh_notifications_ui():
+    if not _client_ok():
+        return
     if not notifications_container_ref[0]:
         return
     container = notifications_container_ref[0]
@@ -351,6 +433,8 @@ custom_display_root_ref = [None]
 _header_idle_video_last_shown = [None]
 
 def set_bell_pressed_state(on: bool):
+    if not _client_ok():
+        return
     btn = bell_btn_ref[0]
     if not btn:
         return
@@ -367,13 +451,13 @@ def send_bell_signal():
     bell_pressed_timer_ref[0] = ui.timer(2.0, lambda: set_bell_pressed_state(False), once=True)
 
 def video_play_pause():
-    ui.run_javascript(
+    _run_js_safe(
         "const v=document.getElementById('tutorialVideo');"
         "if(v){if(v.paused){v.play()}else{v.pause()}}"
     )
 
 def video_restart():
-    ui.run_javascript(
+    _run_js_safe(
         "const v=document.getElementById('tutorialVideo');"
         "if(v){v.currentTime=0;v.play()}"
     )
@@ -424,10 +508,12 @@ def get_display_seconds_float() -> float:
     return float(max(0, remaining_seconds[0]))
 
 
-def get_tutorial_video_url(bid: Optional[str]) -> str:
-    if not bid or bid == 'btn_pause':
-        return VIDEO_SRC
-    return TUTORIAL_VIDEO_BY_SERVICE.get(bid, VIDEO_SRC)
+def get_tutorial_video_url(bid: Union[str, None]) -> str:
+    fb = VIDEO_SRC
+    if not bid or bid == "btn_pause":
+        return fb
+    url = TUTORIAL_VIDEO_BY_SERVICE.get(bid, fb)
+    return _media_url_or_fallback(url, fb)
 
 
 def should_use_compact_layout() -> bool:
@@ -455,7 +541,7 @@ def _sync_tutorial_video() -> None:
     if last_tutorial_video_key[0] == key:
         return
     last_tutorial_video_key[0] = key
-    ui.run_javascript(f"""
+    _run_js_safe(f"""
         (function() {{
             const v = document.getElementById('tutorialVideo');
             if (!v) return;
@@ -497,7 +583,7 @@ def update_compact_layout() -> None:
                     btns[bid].move(bg, -1)
             bell_btn_el.classes(remove='bell-btn--small', add='bell-btn--large')
             last_tutorial_video_key[0] = None
-            ui.run_javascript(
+            _run_js_safe(
                 "const v=document.getElementById('tutorialVideo');if(v){v.pause();}"
             )
     if want:
@@ -521,12 +607,12 @@ def sync_header_idle_video(force: bool = False):
         else:
             root.classes(remove='custom-display--with-idle-video', add='custom-display--timer-only')
     if show:
-        ui.run_javascript(
+        _run_js_safe(
             "const v=document.getElementById('headerIdleVideo');"
             "if(v){v.muted=true;v.playsInline=true;v.play().catch(function(){});}"
         )
     else:
-        ui.run_javascript(
+        _run_js_safe(
             "const v=document.getElementById('headerIdleVideo');if(v){v.pause();v.currentTime=0;}"
         )
 
@@ -621,6 +707,8 @@ def repopulate_buttons_grid():
 
 
 def update_revenue_display():
+    if not _client_ok():
+        return
     tr = total_revenue_label_ref[0]
     if not tr:
         return
@@ -641,9 +729,11 @@ def repopulate_cash_tab_rows():
     host.clear()
     revenue_name_refs.clear()
     revenue_value_labels.clear()
+    bids = tuple(iter_service_ids())
+    row_style = 'background: #1e293b; border-radius: 8px;'
     with host:
-        for bid in iter_service_ids():
-            with ui.row().classes('w-full justify-between items-center mb-3 p-2').style('background: #1e293b; border-radius: 8px;'):
+        for bid in bids:
+            with ui.row().classes('w-full justify-between items-center mb-3 p-2').style(row_style):
                 nl = ui.label(service_label(bid)).classes('text-white font-bold')
                 revenue_name_refs[bid] = nl
                 revenue_value_labels[bid] = ui.label('0 UZS').classes('text-yellow-500 font-bold')
@@ -658,10 +748,13 @@ def repopulate_info_price_cards():
     price_per_min_refs.clear()
     save_btn_refs.clear()
     price_inputs: dict[str, Any] = {}
+    bids = tuple(iter_service_ids())
+    sc = service_config
+    card_bg = 'background: #1e293b;'
     with host:
-        for bid in iter_service_ids():
-            config = service_config[bid]
-            with ui.card().classes('w-full mb-3').style('background: #1e293b;'):
+        for bid in bids:
+            config = sc[bid]
+            with ui.card().classes('w-full mb-3').style(card_bg):
                 nl = ui.label(service_label(bid)).classes('text-yellow-500 font-bold mb-2')
                 info_name_refs[bid] = nl
                 pl = ui.label(t('price_per_min')).classes('text-white text-sm mb-1')
@@ -698,8 +791,9 @@ def repopulate_display_visibility_checks():
         return
     host.clear()
     display_svc_checkbox_refs.clear()
+    bids = tuple(iter_service_ids())
     with host:
-        for bid in iter_service_ids():
+        for bid in bids:
             def _make_svc_handler(b):
                 def _on_svc(e):
                     service_button_visible[b] = bool(e.value)
@@ -722,8 +816,9 @@ def repopulate_services_editor():
     host.clear()
     services_name_inputs.clear()
     service_editor_live_values.clear()
+    bids = tuple(iter_service_ids())
     with host:
-        for bid in iter_service_ids():
+        for bid in bids:
             with ui.row().classes('w-full items-center gap-2 mb-2 flex-nowrap'):
                 ui.label(bid).classes('text-gray-500 text-xs shrink-0').style('min-width: 52px; max-width: 72px')
                 cur = (service_display_names.get(bid) or '').strip()
@@ -817,7 +912,10 @@ def update_price_bar():
     label_el.set_text(f"{name} — {price} UZS / MIN")
 
 def update_ui():
-    if 'main_display' not in globals(): return
+    if 'main_display' not in globals():
+        return
+    if _client_deleted():
+        return
     display_sec_float = get_display_seconds_float()
     sec = max(0, int(display_sec_float))
     minutes = sec // 60
@@ -841,7 +939,11 @@ def update_ui():
 
 async def timer_loop():
     dt = 0.05
+    idle_dt = 0.25
     while True:
+        if _client_deleted():
+            await asyncio.sleep(idle_dt)
+            continue
         now = time.monotonic()
 
         # Автовыход из бесплатной паузы: ровно N секунд «стоп», затем снова мойка (как нажали Старт)
@@ -1007,12 +1109,17 @@ def build_app_state():
     }
 
 def save_app_state():
+    if not _client_ok():
+        return
     state = build_app_state()
     state_json = json.dumps(state)
     # store JSON string safely in localStorage
-    ui.run_javascript(
-        f'localStorage.setItem("{LOCAL_STORAGE_KEY}", {json.dumps(state_json)});'
-    )
+    try:
+        ui.run_javascript(
+            f'localStorage.setItem("{LOCAL_STORAGE_KEY}", {json.dumps(state_json)});'
+        )
+    except Exception:
+        pass
 
 def _apply_loaded_state(state_json: str):
     if not state_json:
@@ -1105,7 +1212,6 @@ async def load_app_state():
 tab_contents = {}
 
 def show_tab(tab_name):
-    current_tab[0] = tab_name
     for tab_id, content in tab_contents.items():
         content.set_visibility(tab_id == tab_name)
 
@@ -1600,20 +1706,12 @@ async def main_page():
     sync_header_idle_video(force=True)
 
 
-def _nicegui_use_native() -> bool:
-    """Отдельное окно pywebview: на Windows обычно есть WebView2; на Linux нужны GTK/Qt (python3-gi и т.д.).
-    NICEGUI_NATIVE=1|0 — принудительно. Без переменной: native только на Windows."""
-    v = os.environ.get('NICEGUI_NATIVE', '').strip().lower()
-    if v in ('1', 'true', 'yes', 'on'):
-        return True
-    if v in ('0', 'false', 'no', 'off'):
-        return False
-    return sys.platform == 'win32'
-
-
+print(f"[moyka] веб-интерфейс: http://{APP_HOST}:{APP_PORT}/", flush=True)
 ui.run(
+    host=APP_HOST,
+    port=APP_PORT,
     fullscreen=True,
-    native=_nicegui_use_native(),
+    native=False,
     show=True,
     title="Tesla Pro",
     reload=False,
