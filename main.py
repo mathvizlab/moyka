@@ -604,11 +604,14 @@ def repopulate_buttons_grid():
             btn.on('click', lambda e, b=bid: handle_click(b))
             with btn:
                 if bid == 'btn_pause':
-                    pause_refs['svg'] = ui.html('')
+                    pause_refs['svg'] = ui.html('', sanitize=False)
                     pause_refs['label'] = ui.label(t('start')).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
                 else:
                     path = get_svg_path(bid)
-                    ui.html(f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>')
+                    ui.html(
+                        f'<svg width="4.5vmin" height="4.5vmin" viewBox="0 0 1000 1000"><path d="{path}"/></svg>',
+                        sanitize=False,
+                    )
                     lbl = ui.label(service_label(bid)).classes('font-bold mt-2 text-center').style('font-size: 1.4vmin')
                     grid_label_refs[bid] = lbl
             btns[bid] = btn
@@ -1541,7 +1544,7 @@ async def main_page():
     with ui.row().classes('price-bar price-bar-hidden').style('align-items: center;') as price_bar:
         price_bar_ref[0] = price_bar
         with ui.element('div').classes('price-bar-icon-wrap'):
-            price_bar_icon_ref[0] = ui.html('')
+            price_bar_icon_ref[0] = ui.html('', sanitize=False)
         price_bar_label_ref[0] = ui.label('').classes('font-bold price-bar-label')
 
     # --- Timer display ---
