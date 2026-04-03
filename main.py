@@ -1,7 +1,9 @@
 import gc
 import asyncio
 import json
+import os
 import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -1594,10 +1596,22 @@ async def main_page():
     update_revenue_display()
     sync_header_idle_video(force=True)
 
+
+def _nicegui_use_native() -> bool:
+    """Отдельное окно pywebview: на Windows обычно есть WebView2; на Linux нужны GTK/Qt (python3-gi и т.д.).
+    NICEGUI_NATIVE=1|0 — принудительно. Без переменной: native только на Windows."""
+    v = os.environ.get('NICEGUI_NATIVE', '').strip().lower()
+    if v in ('1', 'true', 'yes', 'on'):
+        return True
+    if v in ('0', 'false', 'no', 'off'):
+        return False
+    return sys.platform == 'win32'
+
+
 ui.run(
-    fullscreen=True,   # полноэкранный режим
-    native=True,       # отдельное окно (не браузер)
+    fullscreen=True,
+    native=_nicegui_use_native(),
     show=True,
     title="Tesla Pro",
-    reload=False
+    reload=False,
 )
