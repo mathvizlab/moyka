@@ -446,6 +446,11 @@ custom_display_root_ref = [None]
 _header_idle_video_last_shown = [None]
 update_ui_gc_ticks = [0]
 
+# --- Radxa / встраиваемые: биллинг в фоне, но отрисовку в браузер не чаще N Гц (иначе ~20 push/с из timer_loop).
+_ui_timer_last_paint_mono = [0.0]
+UI_TIMER_LOOP_REFRESH_MIN_S = 0.15
+BILLING_LOOP_DT_S = 0.1  # было 0.05: реже просыпания asyncio, секунды и revenue по-прежнему с bill_accumulator
+
 def set_bell_pressed_state(on: bool):
     if not _client_ok():
         return
@@ -556,7 +561,7 @@ def _sync_tutorial_video() -> None:
         return
     last_tutorial_video_key[0] = key
     # Сброс src + load() перед новым URL — отдаёт буферы декодера (важно для Mali и встраиваемых GPU).
-    # Воспроизведение только после canplay, когда буфер готов.
+    # oncanplay: play() только когда буфер готов (setTimeout отделяет canplay пустого клипа от нового src).
     _run_js_safe(f"""
         (function() {{
             const v = document.getElementById('tutorialVideo');
@@ -565,12 +570,12 @@ def _sync_tutorial_video() -> None:
             v.src = "";
             v.load();
             setTimeout(function() {{
-                v.addEventListener('canplay', function onReady() {{
-                    v.removeEventListener('canplay', onReady);
+                v.oncanplay = function() {{
+                    v.oncanplay = null;
                     v.muted = true;
                     v.playsInline = true;
                     v.play().catch(function() {{}});
-                }}, {{ once: true }});
+                }};
                 v.src = url;
             }}, 0);
         }})();
@@ -966,7 +971,7 @@ def update_ui():
     update_compact_layout()
 
 async def timer_loop():
-    dt = 0.05
+    dt = BILLING_LOOP_DT_S
     idle_dt = 0.25
     while True:
         if _client_deleted():
@@ -1010,7 +1015,10 @@ async def timer_loop():
             bill_accumulator[0] = 0.0
 
         if active_btn_id[0] and (remaining_seconds[0] > 0 or not is_paused[0]):
-            update_ui()
+            now_paint = time.monotonic()
+            if now_paint - _ui_timer_last_paint_mono[0] >= UI_TIMER_LOOP_REFRESH_MIN_S:
+                _ui_timer_last_paint_mono[0] = now_paint
+                update_ui()
         await asyncio.sleep(dt)
 
 def stop_everything():
@@ -1266,9 +1274,9 @@ async def main_page():
 
     ui.add_head_html("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&display=swap');
+    /* Без Google Fonts — на ARM меньше сети и CPU при старте; похожий «техно» вид даёт system-ui */
     :root { --primary: #ffcc00; --bg: #020617; --btn-size: clamp(60px, 12vmin, 130px); }
-    body { background: var(--bg); margin: 0; font-family: 'Orbitron', sans-serif; overflow: hidden; color: white; }
+    body { background: var(--bg); margin: 0; font-family: ui-rounded, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; overflow: hidden; color: white; }
     .action-btn svg { fill: #64748b; }
     .icon-active svg { fill: var(--primary) !important; }
     .scale-active { transform: scale(1.1); z-index: 10; }
@@ -1405,7 +1413,7 @@ async def main_page():
     .main-stage.layout-active .center-pane { align-self: stretch; }
     .tutorial-video-wrap { display: none; width: 100%; flex: 0 0 auto; align-items: center; justify-content: center; padding: 8px 16px; box-sizing: border-box; }
     .layout-active .tutorial-video-wrap { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; }
-    .tutorial-video-el { width: 601px; height: 500px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.22); background: #000; object-fit: contain; }
+    .tutorial-video-el { width: min(601px, 92vw); height: min(500px, 52vh); max-width: 100%; max-height: 100%; border-radius: 14px; border: 1px solid rgba(255,255,255,0.22); background: #000; object-fit: contain; contain: strict; }
     .idle-buttons-cluster { width: 100%; flex: 0 0 auto; }
     .layout-idle .idle-buttons-cluster { display: flex; align-items: center; justify-content: center; }
     .layout-active .idle-buttons-cluster { display: none !important; }
@@ -1716,7 +1724,7 @@ async def main_page():
             with ui.element('div').classes('tutorial-video-wrap'):
                 ui.html(
                     f'<video id="tutorialVideo" class="tutorial-video-el" muted playsinline loop '
-                    f'preload="metadata" src={json.dumps(VIDEO_SRC)}></video>',
+                    f'preload="none" src={json.dumps(VIDEO_SRC)}></video>',
                     sanitize=False,
                 )
             with ui.element('div').classes('idle-buttons-cluster'):
