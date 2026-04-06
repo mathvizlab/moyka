@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+"""
+Moyka OS — встраиваемый киоск (например Radxa Zero, ARM64, Mali).
+
+Рекомендуемые флаги Chromium / WebView для аппаратного декодирования видео и GPU-растеризации
+(передаются при запуске браузера или оболочки pywebview; способ задачи зависит от ОС/лаунчера):
+
+  --ignore-gpu-blocklist
+  --enable-gpu-rasterization
+  --disable-software-rasterizer
+
+NiceGUI не подставляет эти флаги из Python — настройте их в скрипте запуска или переменных окружения.
+"""
+
 import gc
 import asyncio
 import json
@@ -431,6 +444,7 @@ last_tutorial_video_key = [None]
 header_idle_video_wrap_ref = [None]
 custom_display_root_ref = [None]
 _header_idle_video_last_shown = [None]
+update_ui_gc_ticks = [0]
 
 def set_bell_pressed_state(on: bool):
     if not _client_ok():
@@ -448,7 +462,7 @@ def send_bell_signal():
     set_bell_pressed_state(True)
     if bell_pressed_timer_ref[0]:
         bell_pressed_timer_ref[0].cancel()
-    bell_pressed_timer_ref[0] = ui.timer(2.0, lambda: set_bell_pressed_state(False), once=True)
+    bell_pressed_timer_ref[0] = ui.timer(2.0, lambda: set_bell_pressed_state(False), once=True)  # интервал ≥ 0.5 с
 
 def video_play_pause():
     _run_js_safe(
@@ -541,16 +555,24 @@ def _sync_tutorial_video() -> None:
     if last_tutorial_video_key[0] == key:
         return
     last_tutorial_video_key[0] = key
+    # Сброс src + load() перед новым URL — отдаёт буферы декодера (важно для Mali и встраиваемых GPU).
+    # Воспроизведение только после canplay, когда буфер готов.
     _run_js_safe(f"""
         (function() {{
             const v = document.getElementById('tutorialVideo');
             if (!v) return;
             const url = {json.dumps(url)};
-            v.src = url;
-            v.muted = true;
-            v.playsInline = true;
+            v.src = "";
             v.load();
-            v.play().catch(function() {{}});
+            setTimeout(function() {{
+                v.addEventListener('canplay', function onReady() {{
+                    v.removeEventListener('canplay', onReady);
+                    v.muted = true;
+                    v.playsInline = true;
+                    v.play().catch(function() {{}});
+                }}, {{ once: true }});
+                v.src = url;
+            }}, 0);
         }})();
     """)
 
@@ -588,7 +610,9 @@ def update_compact_layout() -> None:
             )
     if want:
         _sync_tutorial_video()
-    sync_header_idle_video()
+    # Шапка/промо зависят только от compact/non-compact; при неизменном режиме не трогаем DOM/JS.
+    if state_changed:
+        sync_header_idle_video()
 
 
 def sync_header_idle_video(force: bool = False):
@@ -916,6 +940,10 @@ def update_ui():
         return
     if _client_deleted():
         return
+    update_ui_gc_ticks[0] += 1
+    if update_ui_gc_ticks[0] >= 100:
+        update_ui_gc_ticks[0] = 0
+        gc.collect()
     display_sec_float = get_display_seconds_float()
     sec = max(0, int(display_sec_float))
     minutes = sec // 60
@@ -1233,6 +1261,7 @@ async def main_page():
     ui_refs.clear()
     await load_app_state()
 
+    # once=True: немедленный однократный старт asyncio-цикла; не периодический таймер (политика: ≥ 0.5 с для интервалов).
     ui.timer(0, timer_loop, once=True)
 
     ui.add_head_html("""
@@ -1518,7 +1547,7 @@ async def main_page():
                     ui_refs['total'] = tl
                     trl = ui.label('0 UZS').classes('text-yellow-500 font-bold text-lg')
                     total_revenue_label_ref[0] = trl
-                ui.timer(1.0, update_revenue_display)
+                ui.timer(1.0, update_revenue_display)  # ≥ 0.5 с: не чаще двух раз в секунду
             
             # Language Tab
             with ui.column().classes('w-full') as lang_tab:
