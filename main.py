@@ -1403,7 +1403,8 @@ async def main_page():
     .custom-display .sub-info { align-self: flex-end; margin-top: 2px; }
     .main-val { color: #00f2ff; font-size: clamp(4vmin, 6.2vmin, 8vmin); font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; white-space: nowrap; }
     .main-unit { font-size: clamp(1.5vmin, 2vw, 2vmin); color: var(--primary); margin-left: 6px; }
-    .sub-info { color: #94a3b8; font-size: clamp(1.6vmin, 2.2vmin, 2.5vmin); margin-top: 4px; }
+    /* Вторая строка (время или сумма при swap): тот же кегль, что и основной таймер */
+    .sub-info { color: #cbd5e1; font-size: clamp(4vmin, 6.2vmin, 8vmin); font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; white-space: nowrap; margin-top: 4px; }
     .main-stage { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: row; align-items: stretch; justify-content: center; padding: 80px 0 80px; box-sizing: border-box; min-height: 0; }
     .main-stage.layout-idle { padding-top: clamp(130px, 20vh, 200px); }
     /* stretch — и центр, и правая колонка на всю высоту экрана (минус padding main-stage) */
