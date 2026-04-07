@@ -19,7 +19,6 @@ import json
 import os
 import re
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Union
 
@@ -385,6 +384,7 @@ currency_code = ["UZS"]
 # Панель настроек и флаг «меню открыто» — по id клиента (не глобально: иначе Q и клики цепляются не к той вкладке).
 _side_menu_by_client: dict[str, Any] = {}
 _menu_open_by_client: dict[str, bool] = {}
+_menu_was_running_by_client: dict[str, bool] = {}
 btns, pause_refs = {}, {}
 # Q → menu: admin-adjustable
 # Free pause N>0: after user presses Pause, wash is frozen N seconds only, then auto-resumes (same service, timer + money flow).
@@ -400,9 +400,19 @@ custom_display_meta_ref = [None]
 bill_accumulator = [0.0]
 billing_phase_start = [None]  # monotonic() at start of current displayed second slice (when running)
 
-def start_session_if_needed():
+def start_session_if_needed(bid: str | None = None):
     if remaining_seconds[0] <= 0:
-        remaining_seconds[0] = DEFAULT_SESSION_SECONDS
+        # Бонус применяется и к времени, и к денежному балансу (через тариф выбранной услуги).
+        base_seconds = int(DEFAULT_SESSION_SECONDS)
+        total_seconds = int(round(base_seconds * bonus_multiplier()))
+        remaining_seconds[0] = max(0, total_seconds)
+        bonus_seconds = max(0, total_seconds - base_seconds)
+        if bid and bid in service_config and bonus_seconds > 0:
+            ppm = float(service_config.get(bid, {}).get("price_per_min", 0) or 0)
+            rate = (ppm / 60.0) if ppm > 0 else 0.0
+            bonus_money = int(bonus_seconds * rate + 1e-6) if rate > 0 else 0
+            if bonus_money > 0:
+                notify(f"Bonus +{bonus_seconds}s / +{bonus_money} UZS")
 
 def switch_service(bid):
     active_btn_id[0] = bid
@@ -423,33 +433,10 @@ def set_running(running: bool):
         _sync_running_phase()
     update_pause_visuals()
 
-# Notifications: list of {"ts": float, "text": str}
-notifications = []
-notifications_container_ref = [None]
-
 def notify(text):
-    notifications.append({"ts": time.time(), "text": str(text)})
-    _refresh_notifications_ui()
-
-def _refresh_notifications_ui():
-    if not _client_ok():
-        return
-    if not notifications_container_ref[0]:
-        return
-    container = notifications_container_ref[0]
-    container.clear()
-    with container:
-        for entry in reversed(notifications[-50:]):
-            ts = entry["ts"]
-            dt = datetime.fromtimestamp(ts)
-            tstr = dt.strftime("%H:%M:%S")
-            with ui.row().classes("w-full items-center gap-2 py-1 text-sm"):
-                ui.label(tstr).classes("text-gray-400 shrink-0")
-                ui.label(entry["text"]).classes("text-white truncate")
-
-def clear_notifications():
-    notifications.clear()
-    _refresh_notifications_ui()
+    msg = str(text)
+    print(msg, flush=True)
+    ui.notify(msg)
 
 bell_btn_ref = [None]
 bell_pressed_timer_ref = [None]
@@ -487,21 +474,10 @@ def send_bell_signal():
         bell_pressed_timer_ref[0].cancel()
     bell_pressed_timer_ref[0] = ui.timer(2.0, lambda: set_bell_pressed_state(False), once=True)  # интервал ≥ 0.5 с
 
-def video_play_pause():
-    _run_js_safe(
-        "const v=document.getElementById('tutorialVideo');"
-        "if(v){if(v.paused){v.play()}else{v.pause()}}"
-    )
-
-def video_restart():
-    _run_js_safe(
-        "const v=document.getElementById('tutorialVideo');"
-        "if(v){v.currentTime=0;v.play()}"
-    )
-
 price_bar_ref = [None]
 price_bar_icon_ref = [None]
 price_bar_label_ref = [None]
+header_service_line_ref = [None]
 
 # --- SERVICE CONFIGURATION ---
 def init_service_config():
@@ -587,6 +563,17 @@ def _sync_tutorial_video() -> None:
             const v = document.getElementById('tutorialVideo');
             if (!v) return;
             const url = {json.dumps(url)};
+            function forceLoop() {{
+                // Некоторые WebView/драйверы иногда «теряют» loop на конце ролика.
+                v.loop = true;
+                v.muted = true;
+                v.playsInline = true;
+            }}
+            function restartFromStart() {{
+                forceLoop();
+                try {{ v.currentTime = 0; }} catch (e) {{}}
+                v.play().catch(function() {{}});
+            }}
             let started = false;
             function startPlay() {{
                 if (started) return;
@@ -594,11 +581,12 @@ def _sync_tutorial_video() -> None:
                 v.removeEventListener('loadeddata', startPlay);
                 v.removeEventListener('canplay', startPlay);
                 v.oncanplay = null;
-                v.muted = true;
-                v.playsInline = true;
-                v.loop = true;
+                forceLoop();
                 v.play().catch(function() {{}});
             }}
+            v.onended = restartFromStart;
+            v.onstalled = restartFromStart;
+            v.onemptied = restartFromStart;
             v.addEventListener('loadeddata', startPlay, {{ once: true }});
             v.addEventListener('canplay', startPlay, {{ once: true }});
             v.src = "";
@@ -672,7 +660,9 @@ def sync_header_idle_video(force: bool = False):
     if show:
         _run_js_safe(
             f"const v=document.getElementById('headerIdleVideo');"
-            f"if(v){{v.src={src};v.load();v.muted=true;v.playsInline=true;"
+            f"if(v){{v.src={src};v.load();v.muted=true;v.playsInline=true;v.loop=true;"
+            f"v.onended=function(){{try{{v.currentTime=0;}}catch(e){{}}v.play().catch(function(){{}});}};"
+            f"v.onstalled=v.onended;v.onemptied=v.onended;"
             f"v.play().catch(function(){{}});}}"
         )
     else:
@@ -686,31 +676,6 @@ def sync_header_idle_video(force: bool = False):
 def bonus_multiplier():
     return 1.0 + max(0.0, float(bonus_percent[0])) / 100.0
 
-
-def apply_topup(money_uzs: float = 0.0, seconds: int = 0):
-    """пополнение: add paid money and/or time; bonus % multiplies both credits (not used on running timer ticks)."""
-    if not active_btn_id[0]:
-        ui.notify(t('topup_need_service'), color='orange')
-        return
-    m = bonus_multiplier()
-    mu = max(0.0, float(money_uzs))
-    sec = max(0, int(seconds))
-    if mu <= 0 and sec <= 0:
-        return
-    bid = active_btn_id[0]
-    if mu > 0:
-        service_revenue[bid] += mu * m
-    if sec > 0:
-        add = int(round(sec * m))
-        if remaining_seconds[0] <= 0:
-            remaining_seconds[0] = add
-        else:
-            remaining_seconds[0] += add
-        if not is_paused[0]:
-            _sync_running_phase()
-    save_app_state()
-    update_ui()
-    ui.notify(t('topup_done'), color='green')
 
 def apply_header_display_visibility():
     """Показ строк таймера и баланса в шапке по галочкам (учитывает display_mode swap)."""
@@ -966,20 +931,22 @@ def repopulate_all_dynamic_ui():
 
 def update_price_bar():
     bar, icon_el, label_el = price_bar_ref[0], price_bar_icon_ref[0], price_bar_label_ref[0]
-    if not bar or not label_el:
-        return
+    header_line = header_service_line_ref[0]
+    if bar:
+        # Старая жёлтая плашка больше не используется: строка услуги теперь внутри верхней рамки.
+        bar.classes(remove="price-bar-visible", add="price-bar-hidden")
     bid = active_btn_id[0]
     if not bid or bid not in service_config:
-        bar.classes(remove="price-bar-visible", add="price-bar-hidden")
+        if header_line:
+            header_line.set_text("")
         return
-    bar.classes(remove="price-bar-hidden", add="price-bar-visible")
     name = service_label(bid)
     price = service_config[bid]["price_per_min"]
-    path = get_svg_path(bid)
-    svg = f'<svg width="28" height="28" viewBox="0 0 1000 1000" style="fill:#020617; display:block;"><path d="{path}"/></svg>'
-    if icon_el:
-        icon_el.content = svg
-    label_el.set_text(f"{name} — {price} UZS / MIN")
+    if header_line:
+        header_line.set_text(f"{name} — {price} UZS / MIN")
+    # Оставляем обновление старых refs на случай обратного отката.
+    if label_el:
+        label_el.set_text(f"{name} — {price} UZS / MIN")
 
 def update_ui():
     if 'main_display' not in globals():
@@ -1092,7 +1059,7 @@ def handle_click(bid):
 
     if bid not in service_config:
         return
-    start_session_if_needed()
+    start_session_if_needed(bid)
     switch_service(bid)
     if is_paused[0]:
         set_running(True)
@@ -1177,10 +1144,21 @@ def toggle_menu(client) -> None:
     open_now = not _menu_open_by_client.get(cid, False)
     _menu_open_by_client[cid] = open_now
     if open_now:
+        # При открытии Q-меню ставим мойку на паузу (без автовозобновления free pause).
+        was_running = bool(active_btn_id[0] and (not is_paused[0]) and remaining_seconds[0] > 0)
+        _menu_was_running_by_client[cid] = was_running
+        if was_running:
+            set_running(False)
+            pause_started_at[0] = None
+            update_ui()
         # Сначала «пробить» pointer-events на main-stage (body.settings-menu-open), потом показать панель
         _pause_kiosk_videos_for_menu()
     lp.classes(add='menu-visible' if open_now else '', remove='menu-visible' if not open_now else '')
     if not open_now:
+        # Возвращаем состояние «бежала мойка» до открытия меню.
+        if _menu_was_running_by_client.pop(cid, False) and active_btn_id[0] and remaining_seconds[0] > 0:
+            set_running(True)
+            update_ui()
         _resume_kiosk_videos_after_menu()
 
 
@@ -1426,9 +1404,9 @@ async def main_page():
     .price-bar-visible { visibility: visible; opacity: 1; }
     .custom-display {
       position: fixed; top: 0; left: 0; right: 0; width: 100%; max-width: 100%; margin-top: 0; box-sizing: border-box;
-      z-index: 100; background: #0f172a; border: 1.5px solid var(--primary); border-top: none;
+      z-index: 100; background: #0f172a; border: none; border-bottom: 2px solid var(--primary);
       border-radius: 0;
-      padding: 0 max(12px, env(safe-area-inset-right, 0px)) clamp(10px, 1.5vw, 14px) max(12px, env(safe-area-inset-left, 0px));
+      padding: 0 max(12px, env(safe-area-inset-right, 0px)) clamp(14px, 2vw, 20px) max(12px, env(safe-area-inset-left, 0px));
       padding-top: max(0px, env(safe-area-inset-top, 0px));
       display: flex; flex-direction: column; align-items: stretch; gap: 0;
     }
@@ -1505,10 +1483,13 @@ async def main_page():
     }
     .custom-display .items-baseline { justify-content: flex-end; width: 100%; flex-wrap: wrap; }
     .custom-display .head-subrow { align-self: flex-end; margin-top: 2px; flex-wrap: nowrap; }
+    .head-thirdrow { justify-content: flex-end; width: 100%; margin-top: 4px; }
+    /* Третья строка в том же стиле, что и стикеры TIME/UZS */
+    .head-thirdline { font-size: clamp(2.5vmin, 3.6vmin, 4.5vmin); color: #ffcc00; font-weight: 800; line-height: 1.1; letter-spacing: 0.04em; white-space: nowrap; text-transform: uppercase; }
     /* Крупные цифры: время и сумма — один цвет и кегль */
     .head-value { color: #00f2ff; font-size: clamp(4vmin, 6.2vmin, 8vmin); font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; white-space: nowrap; }
     /* Подписи TIME / VAQT и UZS — один размер и тот же цвет, что и цифры */
-    .head-sticker { font-size: clamp(2.5vmin, 3.6vmin, 4.5vmin); color: #00f2ff; font-weight: 800; line-height: 1.1; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; }
+    .head-sticker { font-size: clamp(2.5vmin, 3.6vmin, 4.5vmin); color: #ffcc00; font-weight: 800; line-height: 1.1; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; }
     .main-stage { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: row; align-items: stretch; justify-content: center; padding: 80px 0 80px; box-sizing: border-box; min-height: 0; }
     /* Под выросшую шапку с промо-видео */
     .main-stage.layout-idle { padding-top: clamp(168px, 26vh, 248px); }
@@ -1587,8 +1568,10 @@ async def main_page():
       grid-auto-rows: min-content;
       gap: clamp(0.9vmin, 1.6vmin, 2vmin);
       column-gap: clamp(1vmin, 1.8vmin, 2.2vmin);
-      align-content: start;
+      /* Кнопки строго по центру между верхней жёлтой линией и низом рабочей области */
+      align-content: center !important;
       justify-items: center;
+      justify-content: center;
       padding: 0 max(6px, env(safe-area-inset-right, 0px)) max(8px, env(safe-area-inset-bottom, 0px)) 10px;
       margin-right: 0;
       border-left: 2px solid var(--primary);
@@ -1597,6 +1580,7 @@ async def main_page():
       overflow-y: auto;
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
+      height: 100%;
     }
     .layout-active .right-rail { display: grid; }
     .layout-active .right-rail .bell-rail-cell { justify-self: center; margin-top: 0; }
@@ -1727,7 +1711,26 @@ async def main_page():
                 def save_bonus():
                     try:
                         raw = str(bp_input.value or '').strip().replace(',', '.')
-                        bonus_percent[0] = max(0.0, float(raw or 0))
+                        old_bonus = float(bonus_percent[0])
+                        new_bonus = max(0.0, float(raw or 0))
+                        bonus_percent[0] = new_bonus
+                        # Бонус = абсолютный процент. При смене 100 -> 10 должно стать -90, а не +10.
+                        if active_btn_id[0] and remaining_seconds[0] > 0:
+                            old_mult = 1.0 + max(0.0, old_bonus) / 100.0
+                            new_mult = 1.0 + new_bonus / 100.0
+                            base_seconds = float(remaining_seconds[0]) / old_mult if old_mult > 0 else float(remaining_seconds[0])
+                            target_seconds = int(round(base_seconds * new_mult))
+                            delta_seconds = target_seconds - int(remaining_seconds[0])
+                            if delta_seconds != 0:
+                                remaining_seconds[0] = max(0, target_seconds)
+                                if not is_paused[0]:
+                                    _sync_running_phase()
+                                bid = active_btn_id[0]
+                                ppm = float(service_config.get(bid, {}).get("price_per_min", 0) or 0)
+                                rate = (ppm / 60.0) if ppm > 0 else 0.0
+                                delta_money = int(delta_seconds * rate)
+                                sign = "+" if delta_seconds > 0 else ""
+                                ui.notify(f"Bonus recalculated: {sign}{delta_seconds}s / {sign}{delta_money} UZS", color='green')
                         save_app_state()
                         ui.notify(t('bonus_saved'), color='green')
                         update_ui()
@@ -1856,6 +1859,8 @@ async def main_page():
                 with ui.row().classes('items-baseline justify-end w-full head-subrow'):
                     sub_display = ui.label('').classes('head-value')
                     sub_currency = ui.label('').classes('head-sticker ml-2')
+                with ui.row().classes('items-baseline justify-end w-full head-thirdrow'):
+                    header_service_line_ref[0] = ui.label('').classes('head-thirdline')
 
     # --- Центр: сетка кнопок (простой) ИЛИ видео-туториал; справа — одна колонка кнопок в режиме активной мойки
     with ui.element('div').classes('main-stage layout-idle') as main_stage:
@@ -1898,7 +1903,8 @@ ui.run(
     port=APP_PORT,
     fullscreen=True,
     native=False,
-    show=True,
+    # Без автопопыток открывать GUI-окно/браузер на устройстве; открываем URL вручную.
+    show=False,
     title="Tesla Pro",
     reload=False,
 )
