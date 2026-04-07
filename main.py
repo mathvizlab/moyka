@@ -53,7 +53,14 @@ def _resolved_promo_video_url() -> str:
     promo = STATIC_DIR / "promo.mp4"
     if promo.is_file():
         return "/static/promo.mp4"
-    print(f"[moyka] нет файла {promo} — шапка без промо-ролика", flush=True)
+    foam = ASSETS_DIR / "foam_kiosk.mp4"
+    if foam.is_file():
+        print(
+            f"[moyka] нет {promo.name} в static/ — используем запасной ролик {foam}",
+            flush=True,
+        )
+        return "/assets/foam_kiosk.mp4"
+    print(f"[moyka] нет ни {promo}, ни {foam} — видео в шапке не будет", flush=True)
     return ""
 
 
@@ -78,14 +85,8 @@ def _client_deleted() -> bool:
 
 
 def _client_ok() -> bool:
-    """Можно слать WebSocket/JS (сокет поднят)."""
-    if _client_deleted():
-        return False
-    try:
-        c = context.client
-    except RuntimeError:
-        return False
-    return bool(c.has_socket_connection)
+    """Клиент ещё на странице (без жёсткой проверки сокета — иначе JS для видео мог не уходить)."""
+    return not _client_deleted()
 
 
 def _run_js_safe(code: str) -> None:
@@ -97,6 +98,21 @@ def _run_js_safe(code: str) -> None:
         pass
 
 
+_missing_media_warned: set[str] = set()
+
+
+def _warn_missing_media_once(p: Path) -> None:
+    """Один раз за процесс на путь — иначе спам при каждом update_ui (не RAM, а шум и I/O)."""
+    try:
+        key = str(p.resolve())
+    except OSError:
+        key = str(p)
+    if key in _missing_media_warned:
+        return
+    _missing_media_warned.add(key)
+    print(f"[moyka] нет медиа: {p}", flush=True)
+
+
 def _media_url_or_fallback(url: str, fallback: str) -> str:
     if not url:
         return fallback
@@ -105,14 +121,14 @@ def _media_url_or_fallback(url: str, fallback: str) -> str:
         p = STATIC_DIR / rel
         if p.is_file():
             return url
-        print(f"[moyka] нет медиа: {p}", flush=True)
+        _warn_missing_media_once(p)
         return fallback
     if url.startswith("/assets/"):
         rel = url[len("/assets/") :]
         p = ASSETS_DIR / rel
         if p.is_file():
             return url
-        print(f"[moyka] нет медиа: {p}", flush=True)
+        _warn_missing_media_once(p)
         return fallback
     return url
 
@@ -168,9 +184,9 @@ service_button_order = list(SERVICE_NAMES.keys())
 service_display_names: dict[str, str] = {}
 service_button_visible = {bid: True for bid in service_button_order}
 
-# Готово под ролики: static/tutorials/btn2.mp4 … btn14.mp4 (имя = id кнопки). FOAM — assets/foam.mp4.
+# Готово под ролики: static/tutorials/btn2.mp4 … btn14.mp4 (имя = id кнопки). FOAM — assets/foam_kiosk.mp4 (H.264 baseline, лёгкий для ARM/Mali).
 TUTORIAL_VIDEO_BY_SERVICE = {bid: f"/static/tutorials/{bid}.mp4" for bid in SERVICE_NAMES}
-TUTORIAL_VIDEO_BY_SERVICE["btn1"] = "/assets/foam.mp4"
+TUTORIAL_VIDEO_BY_SERVICE["btn1"] = "/assets/foam_kiosk.mp4"
 
 # --- TRANSLATIONS (ENG, RUS, UZB) ---
 LANGS = ["eng", "rus", "uzb"]
@@ -366,7 +382,9 @@ active_btn_id = [None]
 is_paused = [True]
 display_mode = [0]  # 0 = TIME big, 1 = MONEY big
 currency_code = ["UZS"]
-menu_open = [False]
+# Панель настроек и флаг «меню открыто» — по id клиента (не глобально: иначе Q и клики цепляются не к той вкладке).
+_side_menu_by_client: dict[str, Any] = {}
+_menu_open_by_client: dict[str, bool] = {}
 btns, pause_refs = {}, {}
 # Q → menu: admin-adjustable
 # Free pause N>0: after user presses Pause, wash is frozen N seconds only, then auto-resumes (same service, timer + money flow).
@@ -560,24 +578,38 @@ def _sync_tutorial_video() -> None:
     if last_tutorial_video_key[0] == key:
         return
     last_tutorial_video_key[0] = key
-    # Сброс src + load() перед новым URL — отдаёт буферы декодера (важно для Mali и встраиваемых GPU).
-    # oncanplay: play() только когда буфер готов (setTimeout отделяет canplay пустого клипа от нового src).
+    # Сброс src + load() перед новым URL (Mali / встраиваемые). Двойной rAF — плеер в блоке, который
+    # только что стал visible; иначе canplay/декод иногда не срабатывают. loadeddata — запасной триггер.
+    if not url:
+        return
     _run_js_safe(f"""
         (function() {{
             const v = document.getElementById('tutorialVideo');
             if (!v) return;
             const url = {json.dumps(url)};
+            let started = false;
+            function startPlay() {{
+                if (started) return;
+                started = true;
+                v.removeEventListener('loadeddata', startPlay);
+                v.removeEventListener('canplay', startPlay);
+                v.oncanplay = null;
+                v.muted = true;
+                v.playsInline = true;
+                v.loop = true;
+                v.play().catch(function() {{}});
+            }}
+            v.addEventListener('loadeddata', startPlay, {{ once: true }});
+            v.addEventListener('canplay', startPlay, {{ once: true }});
             v.src = "";
             v.load();
-            setTimeout(function() {{
-                v.oncanplay = function() {{
-                    v.oncanplay = null;
-                    v.muted = true;
-                    v.playsInline = true;
-                    v.play().catch(function() {{}});
-                }};
-                v.src = url;
-            }}, 0);
+            requestAnimationFrame(function() {{
+                requestAnimationFrame(function() {{
+                    v.src = url;
+                    try {{ v.load(); }} catch (e) {{}}
+                    if (v.readyState >= 2) startPlay();
+                }});
+            }});
         }})();
     """)
 
@@ -611,7 +643,8 @@ def update_compact_layout() -> None:
             bell_btn_el.classes(remove='bell-btn--small', add='bell-btn--large')
             last_tutorial_video_key[0] = None
             _run_js_safe(
-                "const v=document.getElementById('tutorialVideo');if(v){v.pause();}"
+                f"const v=document.getElementById('tutorialVideo');"
+                f"if(v){{v.pause();v.removeAttribute('src');try{{v.load();}}catch(e){{}}}}"
             )
     if want:
         _sync_tutorial_video()
@@ -635,14 +668,18 @@ def sync_header_idle_video(force: bool = False):
             root.classes(remove='custom-display--timer-only', add='custom-display--with-idle-video')
         else:
             root.classes(remove='custom-display--with-idle-video', add='custom-display--timer-only')
+    src = json.dumps(VIDEO_SRC)
     if show:
         _run_js_safe(
-            "const v=document.getElementById('headerIdleVideo');"
-            "if(v){v.muted=true;v.playsInline=true;v.play().catch(function(){});}"
+            f"const v=document.getElementById('headerIdleVideo');"
+            f"if(v){{v.src={src};v.load();v.muted=true;v.playsInline=true;"
+            f"v.play().catch(function(){{}});}}"
         )
     else:
+        # Снять src — на ARM/Mali не держать второй декодер, пока играет центральное видео
         _run_js_safe(
-            "const v=document.getElementById('headerIdleVideo');if(v){v.pause();v.currentTime=0;}"
+            "const v=document.getElementById('headerIdleVideo');"
+            "if(v){v.pause();v.removeAttribute('src');try{v.load();}catch(e){}}"
         )
 
 
@@ -688,9 +725,13 @@ def apply_header_display_visibility():
     if display_mode[0] == 0:
         tr.set_visibility(st)
         sub_display.set_visibility(sb)
+        if "sub_currency" in globals() and sub_currency is not None:
+            sub_currency.set_visibility(sb)
     else:
         tr.set_visibility(sb)
         sub_display.set_visibility(st)
+        if "sub_currency" in globals() and sub_currency is not None:
+            sub_currency.set_visibility(False)
 
 
 def apply_service_button_visibility():
@@ -962,11 +1003,15 @@ def update_ui():
     if display_mode[0] == 0:
         main_display.set_text(time_str)
         main_unit.set_text(t('time_unit'))
-        sub_display.set_text(f"{formatted_money} {currency_code[0]}")
+        sub_display.set_text(formatted_money)
+        if "sub_currency" in globals() and sub_currency is not None:
+            sub_currency.set_text(currency_code[0])
     else:
         main_display.set_text(formatted_money)
         main_unit.set_text(currency_code[0])
         sub_display.set_text(time_str)
+        if "sub_currency" in globals() and sub_currency is not None:
+            sub_currency.set_text("")
     apply_header_display_visibility()
     update_compact_layout()
 
@@ -1092,9 +1137,51 @@ def update_pause_visuals():
         pause_refs['label'].set_text(t('stop'))
         pause_refs['svg'].content = f'<svg width="5.5vmin" height="5.5vmin" viewBox="0 0 1000 1000" style="fill:#ff4757;"><path d="{PATH_PAUSE}"/></svg>'
 
-def toggle_menu():
-    menu_open[0] = not menu_open[0]
-    left_panel.classes(add='menu-visible' if menu_open[0] else '', remove='menu-visible' if not menu_open[0] else '')
+def _pause_kiosk_videos_for_menu() -> None:
+    """Киоск/WebView: <video> иногда перехватывает слой ввода; пауза + pointer-events снимают конфликт с Q-меню."""
+    _run_js_safe(r"""
+        (function () {
+            document.body.classList.add('settings-menu-open');
+            ['tutorialVideo', 'headerIdleVideo'].forEach(function (id) {
+                var v = document.getElementById(id);
+                if (!v) return;
+                try { v.pause(); } catch (e) {}
+                v.style.pointerEvents = 'none';
+            });
+        })();
+    """)
+
+
+def _resume_kiosk_videos_after_menu() -> None:
+    _run_js_safe(r"""
+        (function () {
+            document.body.classList.remove('settings-menu-open');
+            ['tutorialVideo', 'headerIdleVideo'].forEach(function (id) {
+                var v = document.getElementById(id);
+                if (v) v.style.pointerEvents = '';
+            });
+        })();
+    """)
+    last_tutorial_video_key[0] = None
+    sync_header_idle_video(force=True)
+    _sync_tutorial_video()
+
+
+def toggle_menu(client) -> None:
+    if client is None:
+        return
+    cid = client.id
+    lp = _side_menu_by_client.get(cid)
+    if lp is None:
+        return
+    open_now = not _menu_open_by_client.get(cid, False)
+    _menu_open_by_client[cid] = open_now
+    if open_now:
+        # Сначала «пробить» pointer-events на main-stage (body.settings-menu-open), потом показать панель
+        _pause_kiosk_videos_for_menu()
+    lp.classes(add='menu-visible' if open_now else '', remove='menu-visible' if not open_now else '')
+    if not open_now:
+        _resume_kiosk_videos_after_menu()
 
 
 def _menu_hotkey(e: events.KeyEventArguments) -> None:
@@ -1106,7 +1193,7 @@ def _menu_hotkey(e: events.KeyEventArguments) -> None:
     key = e.key.name if hasattr(e.key, 'name') else e.key
     if str(key).lower() != 'q':
         return
-    toggle_menu()
+    toggle_menu(e.client)
 
 def update_service_config(bid, price_per_min):
     if bid not in service_config:
@@ -1245,18 +1332,17 @@ async def load_app_state():
         return
     _apply_loaded_state(s)
 
-tab_contents = {}
-
-def show_tab(tab_name):
-    for tab_id, content in tab_contents.items():
-        content.set_visibility(tab_id == tab_name)
-
 @ui.page('/')
 async def main_page():
-    global main_display, main_unit, sub_display, left_panel, tab_contents
+    global main_display, main_unit, sub_display, sub_currency
     btns.clear()
     pause_refs.clear()
-    tab_contents.clear()
+    # Словарь вкладок только для этого клиента; глобальный dict ломал меню при двух вкладках / переподключении.
+    tab_contents: dict[str, Any] = {}
+
+    def show_tab(tab_name: str) -> None:
+        for tab_id, content in tab_contents.items():
+            content.set_visibility(tab_id == tab_name)
     revenue_name_refs.clear()
     info_name_refs.clear()
     price_per_min_refs.clear()
@@ -1280,7 +1366,21 @@ async def main_page():
     .action-btn svg { fill: #64748b; }
     .icon-active svg { fill: var(--primary) !important; }
     .scale-active { transform: scale(1.1); z-index: 10; }
-    .side-menu { position: fixed; top: 0; left: -280px; width: 280px; height: 100vh; background: #080c14; border-right: 2px solid var(--primary); z-index: 2000; display: flex; flex-direction: column; padding: 40px 20px; }
+    /* Очень высокий слой — поверх Quasar/оверлеев; клики только по меню при открытии см. ниже */
+    .side-menu { position: fixed; top: 0; left: -280px; width: 280px; height: 100vh; background: #080c14; border-right: 2px solid var(--primary); z-index: 2147483000; display: flex; flex-direction: column; padding: 40px 20px; }
+    body.settings-menu-open .tutorial-video-el,
+    body.settings-menu-open .header-idle-video-el,
+    body.settings-menu-open .tutorial-video-wrap,
+    body.settings-menu-open .header-idle-video-wrap {
+      pointer-events: none !important;
+    }
+    /* Киоск/WebKit: любой невидимый слой может перехватывать клики — при открытом Q-меню кликабельно только оно */
+    body:has(.side-menu.menu-visible) * { pointer-events: none !important; }
+    body:has(.side-menu.menu-visible) .side-menu,
+    body:has(.side-menu.menu-visible) .side-menu * { pointer-events: auto !important; }
+    body.settings-menu-open * { pointer-events: none !important; }
+    body.settings-menu-open .side-menu,
+    body.settings-menu-open .side-menu * { pointer-events: auto !important; }
     .menu-visible { left: 0 !important; }
     .drawer-handle { display: none !important; }
     .bell-host--fixed { position: fixed; top: 50%; right: 20px; transform: translateY(-50%); z-index: 90; display: flex; align-items: center; justify-content: center; }
@@ -1306,6 +1406,7 @@ async def main_page():
       left: 50%;
       transform: translateX(-50%);
       z-index: 3000;
+      pointer-events: none;
       background: var(--primary);
       color: var(--bg);
       padding: clamp(6px, 1.2vw, 12px) clamp(12px, 3vw, 24px);
@@ -1355,7 +1456,7 @@ async def main_page():
       text-align: center !important;
     }
     .custom-display--timer-only .items-baseline { justify-content: center !important; }
-    .custom-display--timer-only .sub-info { align-self: center !important; }
+    .custom-display--timer-only .head-subrow { align-self: center !important; }
     .custom-display--timer-only .header-idle-video-wrap {
       display: none !important;
       flex: 0 0 0 !important;
@@ -1384,12 +1485,15 @@ async def main_page():
       background: #000;
       align-self: flex-start;
     }
+    /* Промо в шапке: выше и визуально крупнее (было 104px — слишком «узкая» полоса) */
     .header-idle-video-el {
       width: 100%;
-      height: 104px;
-      max-height: 104px;
+      height: clamp(132px, 15vh, 200px);
+      min-height: 120px;
+      max-height: min(220px, 28vh);
       display: block;
       object-fit: cover;
+      object-position: center;
       vertical-align: top;
     }
     .custom-display-meta {
@@ -1400,21 +1504,72 @@ async def main_page():
       box-sizing: border-box;
     }
     .custom-display .items-baseline { justify-content: flex-end; width: 100%; flex-wrap: wrap; }
-    .custom-display .sub-info { align-self: flex-end; margin-top: 2px; }
-    .main-val { color: #00f2ff; font-size: clamp(4vmin, 6.2vmin, 8vmin); font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; white-space: nowrap; }
-    .main-unit { font-size: clamp(1.5vmin, 2vw, 2vmin); color: var(--primary); margin-left: 6px; }
-    /* Вторая строка (время или сумма при swap): тот же кегль, что и основной таймер */
-    .sub-info { color: #cbd5e1; font-size: clamp(4vmin, 6.2vmin, 8vmin); font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; white-space: nowrap; margin-top: 4px; }
+    .custom-display .head-subrow { align-self: flex-end; margin-top: 2px; flex-wrap: nowrap; }
+    /* Крупные цифры: время и сумма — один цвет и кегль */
+    .head-value { color: #00f2ff; font-size: clamp(4vmin, 6.2vmin, 8vmin); font-weight: 900; line-height: 1.1; letter-spacing: 0.02em; white-space: nowrap; }
+    /* Подписи TIME / VAQT и UZS — один размер и тот же цвет, что и цифры */
+    .head-sticker { font-size: clamp(2.5vmin, 3.6vmin, 4.5vmin); color: #00f2ff; font-weight: 800; line-height: 1.1; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; }
     .main-stage { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: row; align-items: stretch; justify-content: center; padding: 80px 0 80px; box-sizing: border-box; min-height: 0; }
-    .main-stage.layout-idle { padding-top: clamp(130px, 20vh, 200px); }
+    /* Под выросшую шапку с промо-видео */
+    .main-stage.layout-idle { padding-top: clamp(168px, 26vh, 248px); }
     /* stretch — и центр, и правая колонка на всю высоту экрана (минус padding main-stage) */
-    .main-stage.layout-active { justify-content: flex-start; align-items: stretch; padding: clamp(100px, 14vh, 152px) 4px 12px 10px; min-height: 0; }
+    /* Меньшая «верхняя рамка» под шапку+price-bar; область видео — до правой жёлтой линии и низа */
+    .main-stage.layout-active { justify-content: flex-start; align-items: stretch; width: 100%; max-width: 100%; padding: clamp(96px, 10.5vh, 132px) 0 max(8px, env(safe-area-inset-bottom, 0px)) 0; min-height: 0; }
     /* column: иначе при layout-active один ребёнок (видео) в row не растягивается — «квадратик» слева */
     .center-pane { flex: 1 1 0; display: flex; flex-direction: column; align-items: stretch; justify-content: center; min-width: 0; min-height: 0; position: relative; }
-    .main-stage.layout-active .center-pane { align-self: stretch; }
+    /* Рабочая область между жёлтой шапкой/плашкой и правой рамкой — на всю ширину ряда */
+    .main-stage.layout-active .center-pane { align-self: stretch; justify-content: stretch; min-width: 0; flex: 1 1 0; width: 100%; max-width: none; }
     .tutorial-video-wrap { display: none; width: 100%; flex: 0 0 auto; align-items: center; justify-content: center; padding: 8px 16px; box-sizing: border-box; }
-    .layout-active .tutorial-video-wrap { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; }
-    .tutorial-video-el { width: min(601px, 92vw); height: min(500px, 52vh); max-width: 100%; max-height: 100%; border-radius: 14px; border: 1px solid rgba(255,255,255,0.22); background: #000; object-fit: contain; contain: strict; }
+    /* На всю center-pane (между верхом main-stage и правой жёлтой линией): absolute inset обходит узкие обёртки NiceGUI */
+    .layout-active .tutorial-video-wrap {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      width: auto;
+      height: auto;
+      min-width: 0;
+      min-height: 0;
+      padding: 0;
+      box-sizing: border-box;
+      overflow: hidden;
+      flex: none;
+    }
+    /* NiceGUI: ui.html даёт div с shrink-to-fit по видео — без 100% снова чёрные столбы */
+    .layout-active .tutorial-video-html-host,
+    .layout-active .tutorial-video-wrap > * {
+      flex: 1 1 auto;
+      width: 100% !important;
+      height: 100% !important;
+      max-width: none !important;
+      min-width: 0 !important;
+      min-height: 0 !important;
+      box-sizing: border-box;
+      display: block !important;
+      margin: 0 !important;
+    }
+    /* Меньше пикселей на экране = меньше нагрузка на Mali (Radxa Zero и т.п.) — в idle компактно */
+    .tutorial-video-el { width: min(480px, 90vw); height: min(270px, 42vh); max-width: 100%; max-height: 100%; border-radius: 14px; border: 1px solid rgba(255,255,255,0.22); background: #000; object-fit: contain; contain: strict; }
+    /* Вся рабочая поверхность: cover (портретный ролик заполняет ширину, кадр обрезается по краям) */
+    .layout-active .tutorial-video-el,
+    .layout-active #tutorialVideo {
+      display: block;
+      width: 100% !important;
+      height: 100% !important;
+      max-width: none !important;
+      max-height: none !important;
+      min-width: 100%;
+      min-height: 100%;
+      border-radius: 0;
+      border: none;
+      object-fit: cover;
+      object-position: center;
+      contain: none;
+    }
     .idle-buttons-cluster { width: 100%; flex: 0 0 auto; }
     .layout-idle .idle-buttons-cluster { display: flex; align-items: center; justify-content: center; }
     .layout-active .idle-buttons-cluster { display: none !important; }
@@ -1426,6 +1581,7 @@ async def main_page():
       z-index: 90;
       align-self: stretch;
       min-height: 0;
+      max-height: 100%;
       --btn-size: clamp(50px, 9.5vmin, 112px);
       grid-template-columns: repeat(2, var(--btn-size));
       grid-auto-rows: min-content;
@@ -1433,12 +1589,13 @@ async def main_page():
       column-gap: clamp(1vmin, 1.8vmin, 2.2vmin);
       align-content: start;
       justify-items: center;
-      /* сверху: таймер + жёлтая плашка режима (price-bar ниже таймера) */
-      padding: clamp(160px, 22vh, 220px) 6px 12px 8px;
-      padding-right: max(4px, env(safe-area-inset-right, 0px));
+      padding: 0 max(6px, env(safe-area-inset-right, 0px)) max(8px, env(safe-area-inset-bottom, 0px)) 10px;
       margin-right: 0;
+      border-left: 2px solid var(--primary);
+      background: rgba(8, 12, 20, 0.92);
       overflow-x: hidden;
       overflow-y: auto;
+      overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
     }
     .layout-active .right-rail { display: grid; }
@@ -1473,73 +1630,49 @@ async def main_page():
     .side-menu .menu-admin-input .q-field__append {
       color: #f8fafc !important;
     }
+    .side-menu .menu-nav-btn .q-icon { color: #eab308 !important; }
     * { transition: none !important; }
     *:hover { transition: none !important; }
     </style>
     """)
 
     # --- МЕНЮ ---
-    tab_contents = {}
     with ui.element('div').classes('side-menu') as left_panel:
         ui.label('TESLA WASH').classes('text-yellow-500 font-bold mb-8').style('font-size: 16px; letter-spacing: 4px')
         
-        # Tab buttons
+        # Tab buttons — один q-btn (icon+label), on_click как у остальных кнопок NiceGUI
         with ui.column().classes('w-full'):
-            lang_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('lang'))
-            with lang_btn:
-                with ui.row().classes('items-center w-full'):
-                    ui.icon('language', color='yellow-500', size='24px').classes('mr-4')
-                    lbl = ui.label(t('menu_lang')).classes('text-white text-sm font-bold')
-                    ui_refs['menu_lang'] = lbl
-            
-            qr_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start')
-            with qr_btn:
-                with ui.row().classes('items-center w-full'):
-                    ui.icon('qr_code_2', color='yellow-500', size='24px').classes('mr-4')
-                    lbl = ui.label(t('menu_qr')).classes('text-white text-sm font-bold')
-                    ui_refs['menu_qr'] = lbl
-            
-            cash_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('cash'))
-            with cash_btn:
-                with ui.row().classes('items-center w-full'):
-                    ui.icon('payments', color='yellow-500', size='24px').classes('mr-4')
-                    lbl = ui.label(t('menu_cash')).classes('text-white text-sm font-bold')
-                    ui_refs['menu_cash'] = lbl
-            
-            info_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('info'))
-            with info_btn:
-                with ui.row().classes('items-center w-full'):
-                    ui.icon('info', color='yellow-500', size='24px').classes('mr-4')
-                    lbl = ui.label(t('menu_info')).classes('text-white text-sm font-bold')
-                    ui_refs['menu_info'] = lbl
+            ui_refs['menu_lang'] = ui.button(
+                t('menu_lang'), icon='language', on_click=lambda _: show_tab('lang'),
+            ).props('flat no-caps align=left').classes('w-full mb-2 justify-start text-white text-sm font-bold menu-nav-btn')
 
-            services_menu_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('services'))
-            with services_menu_btn:
-                with ui.row().classes('items-center w-full'):
-                    ui.icon('tune', color='yellow-500', size='24px').classes('mr-4')
-                    lbl = ui.label(t('menu_services')).classes('text-white text-sm font-bold')
-                    ui_refs['menu_services'] = lbl
+            ui_refs['menu_qr'] = ui.button(
+                t('menu_qr'), icon='qr_code_2', on_click=lambda _: ui.notify('QR', color='info'),
+            ).props('flat no-caps align=left').classes('w-full mb-2 justify-start text-white text-sm font-bold menu-nav-btn')
 
-            bonus_menu_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('bonus'))
-            with bonus_menu_btn:
-                with ui.row().classes('items-center w-full'):
-                    ui.icon('card_giftcard', color='yellow-500', size='24px').classes('mr-4')
-                    lbl = ui.label(t('menu_bonus')).classes('text-white text-sm font-bold')
-                    ui_refs['menu_bonus'] = lbl
+            ui_refs['menu_cash'] = ui.button(
+                t('menu_cash'), icon='payments', on_click=lambda _: show_tab('cash'),
+            ).props('flat no-caps align=left').classes('w-full mb-2 justify-start text-white text-sm font-bold menu-nav-btn')
 
-            free_pause_menu_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('free_pause'))
-            with free_pause_menu_btn:
-                with ui.row().classes('items-center w-full'):
-                    ui.icon('timer', color='yellow-500', size='24px').classes('mr-4')
-                    lbl = ui.label(t('menu_free_pause')).classes('text-white text-sm font-bold')
-                    ui_refs['menu_free_pause'] = lbl
+            ui_refs['menu_info'] = ui.button(
+                t('menu_info'), icon='info', on_click=lambda _: show_tab('info'),
+            ).props('flat no-caps align=left').classes('w-full mb-2 justify-start text-white text-sm font-bold menu-nav-btn')
 
-            display_menu_btn = ui.button().props('flat no-caps').classes('w-full mb-2 justify-start').on('click', lambda: show_tab('display'))
-            with display_menu_btn:
-                with ui.row().classes('items-center w-full'):
-                    ui.icon('visibility', color='yellow-500', size='24px').classes('mr-4')
-                    lbl = ui.label(t('menu_display')).classes('text-white text-sm font-bold')
-                    ui_refs['menu_display'] = lbl
+            ui_refs['menu_services'] = ui.button(
+                t('menu_services'), icon='tune', on_click=lambda _: show_tab('services'),
+            ).props('flat no-caps align=left').classes('w-full mb-2 justify-start text-white text-sm font-bold menu-nav-btn')
+
+            ui_refs['menu_bonus'] = ui.button(
+                t('menu_bonus'), icon='card_giftcard', on_click=lambda _: show_tab('bonus'),
+            ).props('flat no-caps align=left').classes('w-full mb-2 justify-start text-white text-sm font-bold menu-nav-btn')
+
+            ui_refs['menu_free_pause'] = ui.button(
+                t('menu_free_pause'), icon='timer', on_click=lambda _: show_tab('free_pause'),
+            ).props('flat no-caps align=left').classes('w-full mb-2 justify-start text-white text-sm font-bold menu-nav-btn')
+
+            ui_refs['menu_display'] = ui.button(
+                t('menu_display'), icon='visibility', on_click=lambda _: show_tab('display'),
+            ).props('flat no-caps align=left').classes('w-full mb-2 justify-start text-white text-sm font-bold menu-nav-btn')
         
         # Tab content containers
         with ui.column().classes('w-full mt-4').style('max-height: calc(100vh - 200px); overflow-y: auto;') as tab_container:
@@ -1671,6 +1804,10 @@ async def main_page():
                     ui.button(t('services_save_names'), on_click=save_service_names_from_editor).classes('flex-grow').props('color=primary')
                     ui.button(t('service_add'), on_click=add_service_to_order).classes('flex-grow').props('outline')
 
+    _cid = context.client.id
+    _side_menu_by_client[_cid] = left_panel
+    _menu_open_by_client.setdefault(_cid, False)
+
     # Global Q — must go through NiceGUI so menu state and DOM stay in sync (raw JS toggle was unreliable).
     ui.keyboard(on_key=_menu_hotkey, ignore=['input', 'textarea', 'select'])
 
@@ -1714,9 +1851,11 @@ async def main_page():
                 tr_el = ui.row().classes('items-baseline')
                 timer_row_ref[0] = tr_el
                 with tr_el:
-                    main_display = ui.label('').classes('main-val')
-                    main_unit = ui.label('').classes('main-unit ml-2')
-                sub_display = ui.label('').classes('sub-info')
+                    main_display = ui.label('').classes('head-value')
+                    main_unit = ui.label('').classes('head-sticker ml-2')
+                with ui.row().classes('items-baseline justify-end w-full head-subrow'):
+                    sub_display = ui.label('').classes('head-value')
+                    sub_currency = ui.label('').classes('head-sticker ml-2')
 
     # --- Центр: сетка кнопок (простой) ИЛИ видео-туториал; справа — одна колонка кнопок в режиме активной мойки
     with ui.element('div').classes('main-stage layout-idle') as main_stage:
@@ -1727,7 +1866,7 @@ async def main_page():
                     f'<video id="tutorialVideo" class="tutorial-video-el" muted playsinline loop '
                     f'preload="none" src={json.dumps(VIDEO_SRC)}></video>',
                     sanitize=False,
-                )
+                ).classes('tutorial-video-html-host')
             with ui.element('div').classes('idle-buttons-cluster'):
                 with ui.element('div').classes('screen-center'):
                     with ui.element('div').classes('buttons-grid') as buttons_grid:
@@ -1743,6 +1882,15 @@ async def main_page():
     update_revenue_display()
     sync_header_idle_video(force=True)
 
+
+def _on_client_disconnect(client=None) -> None:
+    if client is None:
+        return
+    _side_menu_by_client.pop(client.id, None)
+    _menu_open_by_client.pop(client.id, None)
+
+
+app.on_disconnect(_on_client_disconnect)
 
 print(f"[moyka] веб-интерфейс: http://{APP_HOST}:{APP_PORT}/", flush=True)
 ui.run(
