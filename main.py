@@ -24,6 +24,8 @@ from typing import Any, Union
 
 from nicegui import app, context, events, ui
 
+import kiosk_hardware
+
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 ASSETS_DIR = BASE_DIR / "assets"
@@ -64,6 +66,17 @@ def _resolved_promo_video_url() -> str:
 
 
 VIDEO_SRC = _resolved_promo_video_url()
+
+
+def _resolved_header_video_url() -> str:
+    """Dedicated wide clip for top header to avoid mismatched crop vs center video."""
+    header_clip = ASSETS_DIR / "foam_header.mp4"
+    if header_clip.is_file():
+        return "/assets/foam_header.mp4"
+    return VIDEO_SRC
+
+
+HEADER_VIDEO_SRC = _resolved_header_video_url()
 gc.collect()
 
 # Сетевой запуск (Debian / kiosk / Radxa): при необходимости NICEGUI_HOST / NICEGUI_PORT
@@ -436,7 +449,10 @@ def set_running(running: bool):
 def notify(text):
     msg = str(text)
     print(msg, flush=True)
-    ui.notify(msg)
+    try:
+        ui.notify(msg)
+    except Exception:
+        pass
 
 bell_btn_ref = [None]
 bell_pressed_timer_ref = [None]
@@ -453,8 +469,12 @@ update_ui_gc_ticks = [0]
 
 # --- Radxa / встраиваемые: биллинг в фоне, но отрисовку в браузер не чаще N Гц (иначе ~20 push/с из timer_loop).
 _ui_timer_last_paint_mono = [0.0]
-UI_TIMER_LOOP_REFRESH_MIN_S = 0.15
+UI_TIMER_LOOP_REFRESH_MIN_S = 0.35
 BILLING_LOOP_DT_S = 0.1  # было 0.05: реже просыпания asyncio, секунды и revenue по-прежнему с bill_accumulator
+_last_ui_main_text = [None]
+_last_ui_main_unit = [None]
+_last_ui_sub_text = [None]
+_last_ui_sub_unit = [None]
 
 def set_bell_pressed_state(on: bool):
     if not _client_ok():
@@ -656,7 +676,7 @@ def sync_header_idle_video(force: bool = False):
             root.classes(remove='custom-display--timer-only', add='custom-display--with-idle-video')
         else:
             root.classes(remove='custom-display--with-idle-video', add='custom-display--timer-only')
-    src = json.dumps(VIDEO_SRC)
+    src = json.dumps(HEADER_VIDEO_SRC)
     if show:
         _run_js_safe(
             f"const v=document.getElementById('headerIdleVideo');"
@@ -968,17 +988,29 @@ def update_ui():
     formatted_money = f"{money:,}".replace(",", " ")
 
     if display_mode[0] == 0:
-        main_display.set_text(time_str)
-        main_unit.set_text(t('time_unit'))
-        sub_display.set_text(formatted_money)
-        if "sub_currency" in globals() and sub_currency is not None:
-            sub_currency.set_text(currency_code[0])
+        main_text = time_str
+        main_unit_text = t('time_unit')
+        sub_text = formatted_money
+        sub_unit_text = currency_code[0]
     else:
-        main_display.set_text(formatted_money)
-        main_unit.set_text(currency_code[0])
-        sub_display.set_text(time_str)
-        if "sub_currency" in globals() and sub_currency is not None:
-            sub_currency.set_text("")
+        main_text = formatted_money
+        main_unit_text = currency_code[0]
+        sub_text = time_str
+        sub_unit_text = ""
+
+    # Не отправляем в браузер одинаковые set_text на каждом тике — это уменьшает рывки видео на ARM.
+    if _last_ui_main_text[0] != main_text:
+        main_display.set_text(main_text)
+        _last_ui_main_text[0] = main_text
+    if _last_ui_main_unit[0] != main_unit_text:
+        main_unit.set_text(main_unit_text)
+        _last_ui_main_unit[0] = main_unit_text
+    if _last_ui_sub_text[0] != sub_text:
+        sub_display.set_text(sub_text)
+        _last_ui_sub_text[0] = sub_text
+    if "sub_currency" in globals() and sub_currency is not None and _last_ui_sub_unit[0] != sub_unit_text:
+        sub_currency.set_text(sub_unit_text)
+        _last_ui_sub_unit[0] = sub_unit_text
     apply_header_display_visibility()
     update_compact_layout()
 
@@ -986,6 +1018,14 @@ async def timer_loop():
     dt = BILLING_LOOP_DT_S
     idle_dt = 0.25
     while True:
+        for kind, payload in kiosk_hardware.drain_hw_events():
+            if kind == "cash":
+                apply_cash_topup(int(payload))
+            elif kind == "btn":
+                try:
+                    handle_click(str(payload))
+                except Exception as err:
+                    print(f"[moyka] PCF→кнопка: {err}", flush=True)
         if _client_deleted():
             await asyncio.sleep(idle_dt)
             continue
@@ -1184,6 +1224,31 @@ def update_service_config(bid, price_per_min):
 
 def format_money(amount):
     return f"{int(amount):,}".replace(",", " ")
+
+
+def apply_cash_topup(amount_uzs: int) -> None:
+    """Купюроприёмник: добавить время с учётом бонуса % (только пополнение)."""
+    if amount_uzs <= 0:
+        return
+    bid = active_btn_id[0]
+    if not bid or bid not in service_config:
+        notify(t("topup_need_service"))
+        return
+    rate = get_current_price_per_second()
+    if rate <= 0:
+        notify("Top-up: 0 UZS/min — нельзя перевести сумму во время")
+        return
+    total_sec = int((float(amount_uzs) / rate) * bonus_multiplier() + 1e-6)
+    if total_sec <= 0:
+        return
+    remaining_seconds[0] += total_sec
+    if not is_paused[0] and remaining_seconds[0] > 0:
+        _sync_running_phase()
+    save_app_state()
+    update_price_bar()
+    notify(f"{t('topup_done')}: +{format_money(amount_uzs)} {currency_code[0]} → +{total_sec}s")
+    update_ui()
+
 
 LOCAL_STORAGE_KEY = "tesla_wash_state"
 
@@ -1406,15 +1471,25 @@ async def main_page():
       position: fixed; top: 0; left: 0; right: 0; width: 100%; max-width: 100%; margin-top: 0; box-sizing: border-box;
       z-index: 100; background: #0f172a; border: none; border-bottom: 2px solid var(--primary);
       border-radius: 0;
-      padding: 0 max(12px, env(safe-area-inset-right, 0px)) clamp(14px, 2vw, 20px) max(12px, env(safe-area-inset-left, 0px));
-      padding-top: max(0px, env(safe-area-inset-top, 0px));
+      padding: 0 max(12px, env(safe-area-inset-right, 0px)) clamp(20px, 3vw, 32px) max(12px, env(safe-area-inset-left, 0px));
+      /* Ещё ниже от верхнего края */
+      padding-top: calc(max(0px, env(safe-area-inset-top, 0px)) + 18px);
       display: flex; flex-direction: column; align-items: stretch; gap: 0;
     }
+    /* Разные фокусы по Y: контейнеры сильно отличаются по пропорциям */
+    :root { --header-shell-h: clamp(220px, 30vh, 320px); --video-focus-y-top: 86%; --video-focus-y-center: 62%; }
     /* Промо в шапке на всю ширину: без скруглений, таймер скрыт */
     .custom-display.custom-display--with-idle-video .custom-display-meta {
       display: none !important;
     }
-    .custom-display--with-idle-video .custom-display-top { gap: 0; }
+    .custom-display--with-idle-video .custom-display-top { gap: 0; align-items: stretch !important; height: var(--header-shell-h); min-height: var(--header-shell-h); }
+    /* В режиме шапочного видео: тот же top/bottom для уровня линии, но без боковых полей */
+    .custom-display.custom-display--with-idle-video {
+      padding-top: calc(max(0px, env(safe-area-inset-top, 0px)) + 18px) !important;
+      padding-right: 0 !important;
+      padding-bottom: clamp(20px, 3vw, 32px) !important;
+      padding-left: 0 !important;
+    }
     /* Только таймер: полоса на всю ширину, без скруглений; время и баланс по центру */
     .custom-display.custom-display--timer-only {
       left: 0 !important;
@@ -1422,12 +1497,15 @@ async def main_page():
       width: 100% !important;
       max-width: 100% !important;
       border-radius: 0;
-      padding: max(0px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) clamp(10px, 1.5vw, 14px) max(12px, env(safe-area-inset-left, 0px));
+      /* Тот же уровень и те же отступы, что в обычном режиме шапки */
+      padding: calc(max(0px, env(safe-area-inset-top, 0px)) + 18px) max(12px, env(safe-area-inset-right, 0px)) clamp(20px, 3vw, 32px) max(12px, env(safe-area-inset-left, 0px));
       align-items: stretch;
     }
     .custom-display--timer-only .custom-display-top {
       width: 100% !important;
       justify-content: center !important;
+      height: var(--header-shell-h) !important;
+      min-height: var(--header-shell-h) !important;
     }
     .custom-display--timer-only .custom-display-meta {
       align-items: center !important;
@@ -1452,27 +1530,29 @@ async def main_page():
       align-items: flex-start !important;
       flex-wrap: nowrap !important;
       gap: 12px;
+      height: var(--header-shell-h);
+      min-height: var(--header-shell-h);
     }
     /* Видео растягивается от левого края до таймера */
-    .header-idle-video-wrap {
-      flex: 1 1 0;
-      min-width: 0;
-      width: auto;
-      overflow: hidden;
-      border-radius: 0;
-      background: #000;
-      align-self: flex-start;
+    .header-idle-video-wrap { flex: 1 1 0; min-width: 0; width: auto; overflow: hidden; border-radius: 0; background: #000; align-self: flex-start; height: 100%; min-height: 100%; max-height: 100%; margin: 0; padding: 0; }
+    .custom-display--with-idle-video .header-idle-video-wrap {
+      height: var(--header-shell-h);
+      min-height: var(--header-shell-h);
+      max-height: var(--header-shell-h);
     }
     /* Промо в шапке: выше и визуально крупнее (было 104px — слишком «узкая» полоса) */
     .header-idle-video-el {
       width: 100%;
-      height: clamp(132px, 15vh, 200px);
-      min-height: 120px;
-      max-height: min(220px, 28vh);
+      height: 100%;
+      min-height: 0;
+      max-height: 100%;
       display: block;
+      /* Как у центрального видео: заполняет область, лишнее уходит за рамку */
       object-fit: cover;
-      object-position: center;
+      /* Верхний баннер: сильнее вниз, чтобы не показывал потолок */
+      object-position: center var(--video-focus-y-top);
       vertical-align: top;
+      background: #000;
     }
     .custom-display-meta {
       display: flex; flex-direction: column; align-items: flex-end; text-align: right;
@@ -1480,6 +1560,8 @@ async def main_page():
       min-width: 0;
       padding: 4px 0 4px 4px;
       box-sizing: border-box;
+      height: 100%;
+      justify-content: center;
     }
     .custom-display .items-baseline { justify-content: flex-end; width: 100%; flex-wrap: wrap; }
     .custom-display .head-subrow { align-self: flex-end; margin-top: 2px; flex-wrap: nowrap; }
@@ -1492,10 +1574,10 @@ async def main_page():
     .head-sticker { font-size: clamp(2.5vmin, 3.6vmin, 4.5vmin); color: #ffcc00; font-weight: 800; line-height: 1.1; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; }
     .main-stage { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: row; align-items: stretch; justify-content: center; padding: 80px 0 80px; box-sizing: border-box; min-height: 0; }
     /* Под выросшую шапку с промо-видео */
-    .main-stage.layout-idle { padding-top: clamp(168px, 26vh, 248px); }
+    .main-stage.layout-idle { padding-top: clamp(220px, 35vh, 330px); }
     /* stretch — и центр, и правая колонка на всю высоту экрана (минус padding main-stage) */
     /* Меньшая «верхняя рамка» под шапку+price-bar; область видео — до правой жёлтой линии и низа */
-    .main-stage.layout-active { justify-content: flex-start; align-items: stretch; width: 100%; max-width: 100%; padding: clamp(96px, 10.5vh, 132px) 0 max(8px, env(safe-area-inset-bottom, 0px)) 0; min-height: 0; }
+    .main-stage.layout-active { justify-content: flex-start; align-items: stretch; width: 100%; max-width: 100%; padding: clamp(132px, 16vh, 188px) 0 max(8px, env(safe-area-inset-bottom, 0px)) 0; min-height: 0; }
     /* column: иначе при layout-active один ребёнок (видео) в row не растягивается — «квадратик» слева */
     .center-pane { flex: 1 1 0; display: flex; flex-direction: column; align-items: stretch; justify-content: center; min-width: 0; min-height: 0; position: relative; }
     /* Рабочая область между жёлтой шапкой/плашкой и правой рамкой — на всю ширину ряда */
@@ -1548,7 +1630,8 @@ async def main_page():
       border-radius: 0;
       border: none;
       object-fit: cover;
-      object-position: center;
+      /* Центральное видео: чуть выше, чтобы не упираться в пол */
+      object-position: center var(--video-focus-y-center);
       contain: none;
     }
     .idle-buttons-cluster { width: 100%; flex: 0 0 auto; }
@@ -1845,7 +1928,7 @@ async def main_page():
             with header_idle_video_wrap_ref[0]:
                 ui.html(
                     f'<video id="headerIdleVideo" class="header-idle-video-el" muted playsinline loop '
-                    f'preload="metadata" src={json.dumps(VIDEO_SRC)}></video>',
+                    f'preload="metadata" src={json.dumps(HEADER_VIDEO_SRC)}></video>',
                     sanitize=False,
                 )
             meta_el = ui.element('div').classes('custom-display-meta cursor-pointer').on('click', swap_display)
@@ -1897,6 +1980,16 @@ def _on_client_disconnect(client=None) -> None:
 
 app.on_disconnect(_on_client_disconnect)
 
+
+def _app_startup() -> None:
+    try:
+        kiosk_hardware.start()
+    except Exception as err:
+        print(f"[moyka] kiosk_hardware.start: {err}", flush=True)
+
+
+app.on_startup(_app_startup)
+
 print(f"[moyka] веб-интерфейс: http://{APP_HOST}:{APP_PORT}/", flush=True)
 ui.run(
     host=APP_HOST,
@@ -1909,4 +2002,4 @@ ui.run(
     reload=False,
 )
 
-#dd
+#dd99202204
