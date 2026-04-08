@@ -1,4 +1,18 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Если видите Permission denied на /dev/gpiochip* (Debian / Radxa):
 
+  sudo usermod -aG gpio $USER
+  # выйти из сессии и зайти снова (или: newgrp gpio)
+
+Проверка прав:
+  ls -l /dev/gpiochip*
+
+Временно от root (только для теста):
+  sudo -E python3 bil.py
+  (-E сохраняет ваши export MOYKA_*)
+"""
 
 from __future__ import annotations
 
@@ -48,7 +62,26 @@ if POLL_S > 0.05:
 
 
 def main() -> None:
-    gpio = GPIO(CHIP, LINE, "in", bias=BIAS, edge="none")
+    try:
+        gpio = GPIO(CHIP, LINE, "in", bias=BIAS, edge="none")
+    except Exception as e:
+        # periphery часто кидает GPIOError вокруг Errno 13
+        if not (
+            isinstance(e, PermissionError)
+            or getattr(e, "errno", None) == 13
+            or "ermission denied" in str(e).lower()
+        ):
+            raise
+        print(
+            f"Нет доступа к {CHIP}: {e}\n\n"
+            "Сделайте одно из:\n"
+            "  1) sudo usermod -aG gpio $USER  →  перелогиньтесь\n"
+            "  2) newgrp gpio\n"
+            "  3) для проверки: sudo -E python3 bil.py\n\n"
+            "Права на устройство: ls -l /dev/gpiochip*",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     prev = bool(gpio.read())
     print(
         f"Купюры NV10→PC817→GPIO\n"
