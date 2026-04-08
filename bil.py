@@ -9,9 +9,10 @@
 Проверка прав:
   ls -l /dev/gpiochip*
 
-Временно от root (только для теста):
-  sudo -E python3 bil.py
-  (-E сохраняет ваши export MOYKA_*)
+Временно от root (только для теста) — важно: sudo python3 это НЕ venv.
+  cd ~/Desktop/moyka   # ваш каталог
+  sudo -E ./venv/bin/python3 bil.py
+  (-E сохраняет MOYKA_*; ./venv/bin/python3 — тот же Python, где стоит periphery)
 """
 
 from __future__ import annotations
@@ -24,8 +25,13 @@ try:
     from periphery import GPIO
 except ImportError:
     print(
-        "Установите: pip install python-periphery\n"
-        "или пакет из Debian для periphery, затем снова запустите этот файл.",
+        "Установите в ТОМ ЖЕ Python, которым запускаете скрипт:\n"
+        "  pip install python-periphery\n\n"
+        "Если запускали «sudo python3 bil.py», sudo берёт системный python без venv.\n"
+        "Тогда либо:\n"
+        "  sudo -E ./venv/bin/python3 bil.py\n"
+        "либо добавьте пользователя в группу gpio и запускайте без sudo:\n"
+        "  ./venv/bin/python3 bil.py",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -72,12 +78,16 @@ def main() -> None:
             or "ermission denied" in str(e).lower()
         ):
             raise
+        py = sys.executable
         print(
             f"Нет доступа к {CHIP}: {e}\n\n"
             "Сделайте одно из:\n"
-            "  1) sudo usermod -aG gpio $USER  →  перелогиньтесь\n"
+            "  1) sudo usermod -aG gpio $USER  →  перелогиньтесь, затем без sudo:\n"
+            f"       {py} bil.py\n"
             "  2) newgrp gpio\n"
-            "  3) для проверки: sudo -E python3 bil.py\n\n"
+            f"  3) разовая проверка с root, но тем же Python (чтобы был periphery из venv):\n"
+            f"       sudo -E {py} bil.py\n\n"
+            "Не используйте просто «sudo python3» — это другой интерпретатор.\n"
             "Права на устройство: ls -l /dev/gpiochip*",
             file=sys.stderr,
         )
