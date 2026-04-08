@@ -13,8 +13,9 @@
   MOYKA_GPIO_BACKEND=auto|rpigpio|gpiod|periphery|mock
       auto: RPi.GPIO → иначе gpiod → иначе periphery
   MOYKA_BILL_UZS_PER_PULSE=1000
-  MOYKA_BILL_DEBOUNCE_S=0.03
-  MOYKA_BILL_IDLE_S=0.8
+  MOYKA_BILL_DEBOUNCE_S=0.03   # как в RPi: импульсы чаще 30 мс не считаем
+  MOYKA_BILL_IDLE_S=0.8       # тишина после последнего импульса — конец купюры
+  MOYKA_HW_LOOP_S=0.05         # период главного цикла как time.sleep(0.05) на Pi
   MOYKA_I2C_BUS=1
   MOYKA_I2C_ADDR=32          # 0x20
   MOYKA_I2C_ENABLE=0         # 1 — слушать линию INT и читать PCF8574
@@ -58,6 +59,11 @@
   MOYKA_PCF_BUTTONS=btn1,btn2,btn3,btn4,btn5,btn6,btn7,btn8
 
 Очереди событий забирает main.timer_loop через drain_hw_events().
+
+Алгоритм счёта купюр/кнопок совпадает с типовым RPi.GPIO (BOARD):
+  • купюры: pin 40, PUD_DOWN, событие RISING, софт-дебаунс 30 мс (аналог bouncetime 20 мс на Pi);
+  • INT PCF8574: pin 7, PUD_UP, FALLING, чтение I2C (bouncetime на Pi 200 мс — здесь только софт);
+  • после последнего импульса пауза MOYKA_BILL_IDLE_S (0.8 с) → сумма = импульсы * MOYKA_BILL_UZS_PER_PULSE.
 """
 
 from __future__ import annotations
@@ -77,6 +83,8 @@ _threads_started = False
 BILL_UZS_PER_PULSE = int(os.environ.get("MOYKA_BILL_UZS_PER_PULSE", "1000"))
 BILL_DEBOUNCE_S = float(os.environ.get("MOYKA_BILL_DEBOUNCE_S", "0.03"))
 BILL_IDLE_S = float(os.environ.get("MOYKA_BILL_IDLE_S", "0.8"))
+# Как в скрипте RPi.GPIO: в главном цикле time.sleep(0.05) перед проверкой «тишина после пачки импульсов».
+HW_LOOP_SLEEP_S = float(os.environ.get("MOYKA_HW_LOOP_S", "0.05"))
 
 I2C_BUS = int(os.environ.get("MOYKA_I2C_BUS", "1"))
 try:
@@ -278,7 +286,7 @@ def _run_rpi_gpio() -> None:
     print("[moyka-hw] RPi.GPIO: bill + I2C слушатель запущен", flush=True)
     try:
         while True:
-            time.sleep(0.05)
+            time.sleep(HW_LOOP_SLEEP_S)
             with lock:
                 if pulse_count > 0 and (time.time() - last_pulse_t > BILL_IDLE_S):
                     amount = pulse_count * BILL_UZS_PER_PULSE
@@ -290,6 +298,34 @@ def _run_rpi_gpio() -> None:
 
 
 # --- libgpiod 1.x (Radxa — как рабочий скрипт с gpiod.Chip / get_line / event_wait) ---
+
+
+def _gpiod_request_ev_line(
+    gpiod: Any,
+    line: Any,
+    consumer: str,
+    ev_type: Any,
+    bias: str | None,
+) -> None:
+    """Событие на линии + подтяжка как у RPi.GPIO (PUD_DOWN / PUD_UP), если версия gpiod поддерживает флаги."""
+    flags = 0
+    if bias == "pull_down":
+        for attr in ("LINE_REQ_FLAG_BIAS_PULL_DOWN", "LINE_REQUEST_FLAG_BIAS_PULL_DOWN"):
+            if hasattr(gpiod, attr):
+                flags |= int(getattr(gpiod, attr))
+                break
+    elif bias == "pull_up":
+        for attr in ("LINE_REQ_FLAG_BIAS_PULL_UP", "LINE_REQUEST_FLAG_BIAS_PULL_UP"):
+            if hasattr(gpiod, attr):
+                flags |= int(getattr(gpiod, attr))
+                break
+    try:
+        if flags:
+            line.request(consumer=consumer, type=ev_type, flags=flags)
+        else:
+            line.request(consumer=consumer, type=ev_type)
+    except TypeError:
+        line.request(consumer=consumer, type=ev_type)
 
 
 def _run_gpiod() -> None:
@@ -340,7 +376,13 @@ def _run_gpiod() -> None:
 
     bill_line = chip.get_line(bill_off)
     try:
-        bill_line.request(consumer="moyka_nv10", type=gpiod.LINE_REQ_EV_RISING_EDGE)
+        _gpiod_request_ev_line(
+            gpiod,
+            bill_line,
+            "moyka_nv10",
+            gpiod.LINE_REQ_EV_RISING_EDGE,
+            "pull_down",
+        )
     except Exception as err:
         print(f"[moyka-hw] gpiod bill line {bill_off}: {err}", flush=True)
         try:
@@ -354,7 +396,13 @@ def _run_gpiod() -> None:
     if int_off is not None and bus is not None:
         try:
             int_line = chip.get_line(int_off)
-            int_line.request(consumer="moyka_pcf", type=gpiod.LINE_REQ_EV_FALLING_EDGE)
+            _gpiod_request_ev_line(
+                gpiod,
+                int_line,
+                "moyka_pcf",
+                gpiod.LINE_REQ_EV_FALLING_EDGE,
+                "pull_up",
+            )
         except Exception as err:
             print(f"[moyka-hw] gpiod INT line {int_off}: {err} — только купюры", flush=True)
             int_line = None
@@ -388,8 +436,9 @@ def _run_gpiod() -> None:
             last_pcf = status
 
     print(
-        f"[moyka-hw] gpiod: {chip_path} bill_offset={bill_off} (RISING) "
-        f"int={int_off if int_line else '—'} (FALLING)",
+        f"[moyka-hw] gpiod (как RPi.GPIO): {chip_path} bill={bill_off} RISING+PULL_DOWN "
+        f"int={int_off if int_line else '—'} FALLING+PULL_UP  debounce={BILL_DEBOUNCE_S}s  "
+        f"idle={BILL_IDLE_S}s  loop={HW_LOOP_SLEEP_S}s",
         flush=True,
     )
 
@@ -416,7 +465,7 @@ def _run_gpiod() -> None:
                     _enqueue_cash_uzs(amount)
                     pulse_count = 0
 
-            time.sleep(0.01)
+            time.sleep(HW_LOOP_SLEEP_S)
     finally:
         try:
             bill_line.release()
@@ -581,9 +630,10 @@ def _run_periphery() -> None:
         return
 
     print(
-        f"[moyka-hw] periphery: купюры {bill_chip} line {bill_line_no} "
-        f"mode={bill_mode} bias={bill_bias} стартовый уровень={'HIGH' if lvl else 'LOW'}; "
-        f"INT {int_chip if int_gpio else '—'} {int_line_no if int_gpio else ''}",
+        f"[moyka-hw] periphery (алгоритм как RPi.GPIO BOARD): купюры {bill_chip} line {bill_line_no} "
+        f"mode={bill_mode} bias={bill_bias} (ожидаем RISING после LOW) "
+        f"старт={'HIGH' if lvl else 'LOW'}; INT {int_chip if int_gpio else '—'} "
+        f"{int_line_no if int_gpio else ''}  debounce={BILL_DEBOUNCE_S}s idle={BILL_IDLE_S}s",
         flush=True,
     )
 
@@ -644,7 +694,7 @@ def _run_periphery() -> None:
                         print(f"[moyka-hw] принято {amount} UZS ({pulse_count} имп.)", flush=True)
                         _enqueue_cash_uzs(amount)
                         pulse_count = 0
-                time.sleep(0.001)
+                time.sleep(HW_LOOP_SLEEP_S)
     finally:
         bill_gpio.close()
         if int_gpio:

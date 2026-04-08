@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NV10 → PC817 → GPIO (физ. pin 40). См. MOYKA_* внизу файла и gpiofind PIN_40.
+NV10 → PC817 → GPIO (физ. pin 40). Дефолты как RPi.GPIO: RISING + pull_down, debounce 0.03 с, idle 0.8 с.
+См. MOYKA_* и gpiofind PIN_40.
 """
 
 from __future__ import annotations
@@ -83,12 +84,13 @@ else:
         print("MOYKA_GPIO_LINE должен быть числом", file=sys.stderr)
         sys.exit(1)
 
-EDGE = os.environ.get("MOYKA_EDGE", "falling").strip().lower()
+# По умолчанию как RPi.GPIO: BOARD pin 40, PUD_DOWN, считаем RISING (см. kiosk_hardware / ваш скрипт на Pi).
+EDGE = os.environ.get("MOYKA_EDGE", "rising").strip().lower()
 if EDGE not in ("rising", "falling"):
-    EDGE = "falling"
+    EDGE = "rising"
 
 # falling + pull_up: покой HIGH, импульс тянет линию к GND (коллектор к GPIO, эмиттер GND, подтяжка к 3.3V).
-# rising + pull_down: покой LOW, импульс подаёт на GPIO «единицу» (как у вас: вспышка + ~3 В на ножке).
+# rising + pull_down: покой LOW, импульс подаёт на GPIO «единицу» (RPi: GPIO.setup(40, IN, PUD_DOWN) + RISING).
 BIAS = "pull_up" if EDGE == "falling" else "pull_down"
 
 try:
@@ -161,8 +163,8 @@ def main() -> None:
         f"  UZS за импульс={UZS_PULSE}  debounce={DEBOUNCE_S}s  конец купюры после тишины {IDLE_S}s\n"
         f"  опрос каждые {POLL_S * 1000:.1f} ms{dbg}\n"
         f"Ctrl+C — выход\n"
-        f"Подсказка: на 40-й ножке во время импульса видите ~3 В — попробуйте MOYKA_EDGE=rising "
-        f"(и MOYKA_POLL_S=0.0005). Нет ни [уровень], ни смены в [watch] — неверная линия: "
+        f"Подсказка: по умолчанию rising+pull_down как на Pi; если схема наоборот — MOYKA_EDGE=falling. "
+        f"Короткие импульсы — MOYKA_POLL_S=0.0005. Нет ни [уровень], ни смены в [watch] — неверная линия: "
         f"gpiofind PIN_40 → MOYKA_GPIO_LINE_NAME=PIN_40. Общий GND: плата и NV10.\n",
         flush=True,
     )
