@@ -390,6 +390,8 @@ service_editor_live_values: dict[str, str] = {}
 # --- СИСТЕМНАЯ ЛОГИКА ---
 DEFAULT_SESSION_SECONDS = 30 * 60
 remaining_seconds = [0]  # source of truth for time; 0 = no session
+# Остаток суммы по приёму купюр (UZS). На экране показывается только он; без пополнений = 0.
+acceptor_cash_balance_uzs = [0.0]
 active_btn_id = [None]
 is_paused = [True]
 display_mode = [0]  # 0 = TIME big, 1 = MONEY big
@@ -550,17 +552,11 @@ def get_tutorial_video_url(bid: Union[str, None]) -> str:
 
 
 def should_use_compact_layout() -> bool:
-    """Узкий столбец кнопок справа + видео в центре: есть услуга, время и ненулевой баланс (или тариф 0)."""
+    """Узкий столбец кнопок справа + видео в центре: выбрана услуга и есть оставшееся время."""
     bid = active_btn_id[0]
     if not bid or bid == 'btn_pause':
         return False
     if remaining_seconds[0] <= 0:
-        return False
-    ppm = float(service_config.get(bid, {}).get('price_per_min', 0) or 0)
-    rate = (ppm / 60.0) if ppm > 0 else 0.0
-    display_sec_float = get_display_seconds_float()
-    money = int(display_sec_float * rate + 1e-6) if rate > 0 else 0
-    if rate > 0 and money <= 0:
         return False
     return True
 
@@ -982,9 +978,8 @@ def update_ui():
     minutes = sec // 60
     seconds = sec % 60
     time_str = f"{minutes:02d}:{seconds:02d}"
-    # Сумма на экране = «сколько ещё висит» в UZS по текущему тарифу (UZS/min из меню)
-    rate = get_current_price_per_second()
-    money = int(display_sec_float * rate + 1e-6) if rate > 0 else 0
+    # Сумма на экране только из купюроприёмника (остаток); без приёма — 0.
+    money = int(max(0.0, acceptor_cash_balance_uzs[0]) + 1e-6)
     formatted_money = f"{money:,}".replace(",", " ")
 
     if display_mode[0] == 0:
@@ -1053,6 +1048,9 @@ async def timer_loop():
                 remaining_seconds[0] -= 1
                 if price_per_sec > 0:
                     service_revenue[active_btn_id[0]] += price_per_sec
+                    acceptor_cash_balance_uzs[0] = max(
+                        0.0, acceptor_cash_balance_uzs[0] - price_per_sec
+                    )
                 billing_phase_start[0] = time.monotonic()
                 ticked = True
                 if remaining_seconds[0] <= 0:
@@ -1080,6 +1078,7 @@ def stop_everything():
     bill_accumulator[0] = 0.0
     active_btn_id[0] = None
     remaining_seconds[0] = 0
+    acceptor_cash_balance_uzs[0] = 0.0
     notify("Session ended — time reached 0")
     refresh_button_visuals()
     update_price_bar()
@@ -1241,6 +1240,7 @@ def apply_cash_topup(amount_uzs: int) -> None:
     total_sec = int((float(amount_uzs) / rate) * bonus_multiplier() + 1e-6)
     if total_sec <= 0:
         return
+    acceptor_cash_balance_uzs[0] += float(amount_uzs)
     remaining_seconds[0] += total_sec
     if not is_paused[0] and remaining_seconds[0] > 0:
         _sync_running_phase()
@@ -1272,6 +1272,7 @@ def build_app_state():
         },
         "lang": current_lang[0],
         "display_mode": int(display_mode[0]),
+        "acceptor_cash_balance_uzs": float(acceptor_cash_balance_uzs[0]),
     }
 
 def save_app_state():
@@ -1351,6 +1352,11 @@ def _apply_loaded_state(state_json: str):
         pass
     header_show_timer[0] = bool(data.get("header_show_timer", True))
     header_show_balance[0] = bool(data.get("header_show_balance", True))
+    try:
+        ac = float(data.get("acceptor_cash_balance_uzs", 0.0))
+        acceptor_cash_balance_uzs[0] = max(0.0, ac)
+    except Exception:
+        pass
     vis = data.get("service_button_visible")
     if isinstance(vis, dict):
         for bid in service_button_order:

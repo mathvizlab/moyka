@@ -22,10 +22,18 @@
   MOYKA_RPI_INT_PIN=7
   MOYKA_RPI_BILL_PIN=40
 
-  # Radxa / общий Linux (python-periphery), offsets линий на выбранном chip:
+  # Radxa Zero (S905Y2), тот же 40-pin расклад что у Pi — купюра на pin 40, INT PCF на pin 7:
+  MOYKA_PRESET=radxa_zero
+      → MOYKA_GPIO_BACKEND=periphery, I2C включён, имена линий GPIOAO_11 / GPIOAO_3
+      (см. https://docs.radxa.com/en/zero/zero/hardware-design/hardware-interface )
+      Если установлен gpiofind (пакет gpiod), линии ищутся по имени; иначе задайте вручную:
   MOYKA_GPIOCHIP=/dev/gpiochip0
-  MOYKA_LINE_BILL=0          # обязательно задать на железе
-  MOYKA_LINE_I2C_INT=0     # если MOYKA_I2C_ENABLE=1
+  MOYKA_LINE_BILL=11         # GPIOAO_11 → физ. pin 40 (импульсы купюр, RISING, pull-down)
+  MOYKA_LINE_I2C_INT=3       # GPIOAO_3 → физ. pin 7 (FALLING, pull-up, чтение PCF8574)
+
+  Либо явные имена для gpiofind:
+  MOYKA_GPIO_BILL_NAME=GPIOAO_11
+  MOYKA_GPIO_INT_NAME=GPIOAO_3
 
   # Кнопки PCF8574: список id кнопок через запятую, бит 0 = младший бит статуса
   MOYKA_PCF_BUTTONS=btn1,btn2,btn3,btn4,btn5,btn6,btn7,btn8
@@ -37,6 +45,8 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
+import subprocess
 import threading
 import time
 from typing import Any, Callable
@@ -87,6 +97,45 @@ def _parse_pcf_button_map() -> list[str | None]:
         return []
     parts = [p.strip() for p in raw.split(",")]
     return [p if p else None for p in parts]
+
+
+def _gpiofind_line(name: str) -> tuple[str, int] | None:
+    """Сопоставить имя линии из Device Tree (например GPIOAO_11) с /dev/gpiochipN + offset."""
+    gf = shutil.which("gpiofind")
+    if not gf or not name.strip():
+        return None
+    try:
+        out = subprocess.check_output(
+            [gf, name.strip()],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    parts = out.split()
+    if len(parts) != 2 or not parts[0].startswith("gpiochip"):
+        return None
+    try:
+        return "/dev/" + parts[0], int(parts[1], 0)
+    except ValueError:
+        return None
+
+
+def _apply_hw_presets() -> None:
+    """Подставить типичные настройки под конкретные платы (можно переопределить env)."""
+    p = os.environ.get("MOYKA_PRESET", "").strip().lower()
+    if p in ("radxa_zero", "radxa_zero_s905y2", "s905y2"):
+        os.environ.setdefault("MOYKA_GPIO_BACKEND", "periphery")
+        os.environ.setdefault("MOYKA_GPIO_BILL_NAME", "GPIOAO_11")
+        os.environ.setdefault("MOYKA_GPIO_INT_NAME", "GPIOAO_3")
+        os.environ.setdefault("MOYKA_I2C_ENABLE", "1")
+        os.environ.setdefault("MOYKA_I2C_ADDR", "0x20")
+        os.environ.setdefault("MOYKA_I2C_BUS", "1")
+        if not os.environ.get("MOYKA_LINE_BILL") and not shutil.which("gpiofind"):
+            os.environ.setdefault("MOYKA_GPIOCHIP", "/dev/gpiochip0")
+            os.environ.setdefault("MOYKA_LINE_BILL", "11")
+            os.environ.setdefault("MOYKA_LINE_I2C_INT", "3")
 
 
 def _emit_pcf_delta(prev_byte: int, new_byte: int, bit_map: list[str | None]) -> None:
@@ -189,18 +238,33 @@ def _run_rpi_gpio() -> None:
 def _run_periphery() -> None:
     from periphery import GPIO  # type: ignore
 
-    chip = os.environ.get("MOYKA_GPIOCHIP", "/dev/gpiochip0")
-    try:
-        bill_line_no = int(os.environ["MOYKA_LINE_BILL"], 0)
-    except (KeyError, ValueError):
+    i2c_on = os.environ.get("MOYKA_I2C_ENABLE", "").strip().lower() in ("1", "true", "yes")
+    bit_map = _parse_pcf_button_map()
+
+    bill_name = os.environ.get("MOYKA_GPIO_BILL_NAME", "").strip()
+    int_name = os.environ.get("MOYKA_GPIO_INT_NAME", "").strip()
+    default_chip = os.environ.get("MOYKA_GPIOCHIP", "/dev/gpiochip0")
+
+    bill_chip = default_chip
+    bill_line_no: int | None = None
+    raw_bill = os.environ.get("MOYKA_LINE_BILL", "").strip()
+    if raw_bill:
+        try:
+            bill_line_no = int(raw_bill, 0)
+        except ValueError:
+            bill_line_no = None
+    if bill_line_no is None and bill_name:
+        found = _gpiofind_line(bill_name)
+        if found:
+            bill_chip, bill_line_no = found
+    if bill_line_no is None:
         print(
-            "[moyka-hw] MOYKA_LINE_BILL не задан (см. gpioinfo на Radxa) — поток без импульсов",
+            "[moyka-hw] задайте MOYKA_LINE_BILL или MOYKA_GPIO_BILL_NAME "
+            "(для Radxa Zero S905Y2: MOYKA_PRESET=radxa_zero или LINE_BILL=11 + INT=3)",
             flush=True,
         )
         _run_mock()
         return
-    i2c_on = os.environ.get("MOYKA_I2C_ENABLE", "").strip().lower() in ("1", "true", "yes")
-    bit_map = _parse_pcf_button_map()
 
     try:
         import smbus2
@@ -214,17 +278,32 @@ def _run_periphery() -> None:
         except Exception as err:
             print(f"[moyka-hw] I2C SMBus({I2C_BUS}): {err}", flush=True)
 
+    int_chip = bill_chip
     int_line_no: int | None = None
     if i2c_on and bus is not None:
-        try:
-            int_line_no = int(os.environ.get("MOYKA_LINE_I2C_INT", ""), 0)
-        except ValueError:
-            print("[moyka-hw] MOYKA_I2C_ENABLE без MOYKA_LINE_I2C_INT — только купюры", flush=True)
+        raw_int = os.environ.get("MOYKA_LINE_I2C_INT", "").strip()
+        if raw_int:
+            try:
+                int_line_no = int(raw_int, 0)
+            except ValueError:
+                int_line_no = None
+            int_chip = os.environ.get("MOYKA_GPIOCHIP", bill_chip)
+        elif int_name:
+            found_i = _gpiofind_line(int_name)
+            if found_i:
+                int_chip, int_line_no = found_i
+            else:
+                print(
+                    f"[moyka-hw] gpiofind «{int_name}» не удался — PCF8574 отключён",
+                    flush=True,
+                )
+        if int_line_no is None and (raw_int or int_name):
+            print("[moyka-hw] MOYKA_I2C_ENABLE: не удалось определить линию INT — только купюры", flush=True)
 
-    bill_gpio = GPIO(chip, bill_line_no, "in", bias="pull_down", edge="rising")
+    bill_gpio = GPIO(bill_chip, bill_line_no, "in", bias="pull_down", edge="rising")
     int_gpio = None
-    if int_line_no is not None:
-        int_gpio = GPIO(chip, int_line_no, "in", bias="pull_up", edge="falling")
+    if bus is not None and int_line_no is not None:
+        int_gpio = GPIO(int_chip, int_line_no, "in", bias="pull_up", edge="falling")
 
     pulse_count = 0
     last_pulse_t = 0.0
@@ -256,7 +335,12 @@ def _run_periphery() -> None:
                 _emit_pcf_delta(last_pcf, status, bit_map)
             last_pcf = status
 
-    print(f"[moyka-hw] periphery: {chip} bill={bill_line_no}", flush=True)
+    print(
+        f"[moyka-hw] periphery: купюры {bill_chip} line {bill_line_no} "
+        f"(как RPi BOARD pin 40, RISING); INT {int_chip if int_gpio else '—'} "
+        f"{int_line_no if int_gpio else ''}",
+        flush=True,
+    )
 
     try:
         while True:
@@ -300,6 +384,7 @@ def start() -> None:
     if not hw_enabled():
         print("[moyka-hw] выкл. Включите MOYKA_HW=1 на Radxa/Pi", flush=True)
         return
+    _apply_hw_presets()
     _threads_started = True
     backend = os.environ.get("MOYKA_GPIO_BACKEND", "auto").strip().lower()
 
