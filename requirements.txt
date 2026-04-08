@@ -1,3 +1,5 @@
 nicegui
 smbus2
 python-periphery
+# Radxa libgpiod 1.x (как ваш скрипт): apt install python3-libgpiod или pip install gpiod
+gpiod>=1.5.4

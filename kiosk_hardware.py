@@ -2,15 +2,16 @@
 Аппаратный ввод для киоска: купюроприёмник (импульсы) и опционально PCF8574 по I2C.
 
 На Raspberry Pi можно использовать RPi.GPIO (BOARD, как в вашем скрипте).
-На Radxa Zero RPi.GPIO не работает — используйте python-periphery + sysfs/gpiochip
-(см. переменные MOYKA_GPIOCHIP / MOYKA_LINE_*).
+На Radxa Zero RPi.GPIO не работает — варианты:
+  • MOYKA_GPIO_BACKEND=gpiod — libgpiod 1.x (как ваш рабочий скрипт, см. MOYKA_PRESET=radxa_zero_gpiod)
+  • periphery — /dev/gpiochip* + опрос линии (MOYKA_PRESET=radxa_zero)
 
 Включение: MOYKA_HW=1
 
 Переменные окружения (основные):
   MOYKA_HW=1
-  MOYKA_GPIO_BACKEND=auto|rpigpio|periphery|mock
-      auto: RPi.GPIO если доступен, иначе periphery
+  MOYKA_GPIO_BACKEND=auto|rpigpio|gpiod|periphery|mock
+      auto: RPi.GPIO → иначе gpiod → иначе periphery
   MOYKA_BILL_UZS_PER_PULSE=1000
   MOYKA_BILL_DEBOUNCE_S=0.03
   MOYKA_BILL_IDLE_S=0.8
@@ -24,9 +25,11 @@
 
   # Radxa Zero (S905Y2), тот же 40-pin расклад что у Pi — купюра на pin 40, INT PCF на pin 7:
   MOYKA_PRESET=radxa_zero
-      → MOYKA_GPIO_BACKEND=periphery, I2C включён, имена линий GPIOAO_11 / GPIOAO_3
-      (см. https://docs.radxa.com/en/zero/zero/hardware-design/hardware-interface )
-      Если установлен gpiofind (пакет gpiod), линии ищутся по имени; иначе задайте вручную:
+      → periphery + MOYKA_BILL_MODE=poll (важно: на Radxa edge-события часто «молчат», Pi — RPi.GPIO)
+  MOYKA_BILL_MODE=poll|edge   # poll = опрос уровня (по умолчанию для radxa_zero); edge = старый вариант
+  MOYKA_GPIO_POLL_MS=0.002    # период опроса линии купюр, сек
+
+  Если установлен gpiofind (пакет gpiod), линии ищутся по имени; иначе задайте вручную:
   MOYKA_GPIOCHIP=/dev/gpiochip0
   MOYKA_LINE_BILL=11         # GPIOAO_11 → физ. pin 40 (импульсы купюр, RISING, pull-down)
   MOYKA_LINE_I2C_INT=3       # GPIOAO_3 → физ. pin 7 (FALLING, pull-up, чтение PCF8574)
@@ -34,6 +37,16 @@
   Либо явные имена для gpiofind:
   MOYKA_GPIO_BILL_NAME=GPIOAO_11
   MOYKA_GPIO_INT_NAME=GPIOAO_3
+
+  Права: пользователь должен читать /dev/gpiochip* (группа gpio или root).
+
+  # --- Ваш Radxa Zero (libgpiod): gpiochip1, offset 8 = купюры (RISING), 4 = INT PCF (FALLING) ---
+  MOYKA_PRESET=radxa_zero_gpiod
+      → MOYKA_GPIO_BACKEND=gpiod, chip gpiochip1, линии 8 / 4, I2C шина 1
+  MOYKA_GPIOD_CHIP=gpiochip1      # или /dev/gpiochip1
+  MOYKA_GPIOD_LINE_BILL=8         # GPIOH_8 — NV10
+  MOYKA_GPIOD_LINE_INT=4          # GPIOAO_4 — INT; пусто / none — только купюры
+  (на Radxa проверьте шину: ls /dev/i2c* → MOYKA_I2C_BUS=1 или 7)
 
   # Кнопки PCF8574: список id кнопок через запятую, бит 0 = младший бит статуса
   MOYKA_PCF_BUTTONS=btn1,btn2,btn3,btn4,btn5,btn6,btn7,btn8
@@ -49,6 +62,7 @@ import shutil
 import subprocess
 import threading
 import time
+from datetime import timedelta
 from typing import Any, Callable
 
 _HW_EVENTS: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -127,6 +141,7 @@ def _apply_hw_presets() -> None:
     p = os.environ.get("MOYKA_PRESET", "").strip().lower()
     if p in ("radxa_zero", "radxa_zero_s905y2", "s905y2"):
         os.environ.setdefault("MOYKA_GPIO_BACKEND", "periphery")
+        os.environ.setdefault("MOYKA_BILL_MODE", "poll")
         os.environ.setdefault("MOYKA_GPIO_BILL_NAME", "GPIOAO_11")
         os.environ.setdefault("MOYKA_GPIO_INT_NAME", "GPIOAO_3")
         os.environ.setdefault("MOYKA_I2C_ENABLE", "1")
@@ -136,6 +151,36 @@ def _apply_hw_presets() -> None:
             os.environ.setdefault("MOYKA_GPIOCHIP", "/dev/gpiochip0")
             os.environ.setdefault("MOYKA_LINE_BILL", "11")
             os.environ.setdefault("MOYKA_LINE_I2C_INT", "3")
+
+    if p in ("radxa_zero_gpiod", "radxa_gpiod"):
+        os.environ.setdefault("MOYKA_GPIO_BACKEND", "gpiod")
+        os.environ.setdefault("MOYKA_GPIOD_CHIP", "gpiochip1")
+        os.environ.setdefault("MOYKA_GPIOD_LINE_BILL", "8")
+        os.environ.setdefault("MOYKA_GPIOD_LINE_INT", "4")
+        os.environ.setdefault("MOYKA_I2C_ENABLE", "1")
+        os.environ.setdefault("MOYKA_I2C_ADDR", "0x20")
+        os.environ.setdefault("MOYKA_I2C_BUS", "1")
+
+
+def _gpiod_event_wait(line: Any, timeout_sec: float) -> bool:
+    """libgpiod 1.x Python: разные сборки принимают timedelta, sec или nsec."""
+    if timeout_sec <= 0:
+        td = timedelta(seconds=0)
+    else:
+        td = timedelta(seconds=timeout_sec)
+    try:
+        return bool(line.event_wait(td))
+    except TypeError:
+        pass
+    try:
+        return bool(line.event_wait(sec=timeout_sec))
+    except TypeError:
+        pass
+    try:
+        nsec = max(0, int(timeout_sec * 1e9))
+        return bool(line.event_wait(nsec=nsec))
+    except TypeError:
+        return bool(line.event_wait(timeout_sec))
 
 
 def _emit_pcf_delta(prev_byte: int, new_byte: int, bit_map: list[str | None]) -> None:
@@ -185,18 +230,16 @@ def _run_rpi_gpio() -> None:
 
     pulse_count = 0
     last_pulse_t = 0.0
-    processing = False
     last_pcf = None
     lock = threading.Lock()
 
     def on_bill(_ch: Any) -> None:
-        nonlocal pulse_count, last_pulse_t, processing
+        nonlocal pulse_count, last_pulse_t
         now = time.time()
         with lock:
             if now - last_pulse_t > BILL_DEBOUNCE_S:
                 pulse_count += 1
                 last_pulse_t = now
-                processing = True
 
     def on_int(_ch: Any) -> None:
         nonlocal last_pcf
@@ -222,17 +265,167 @@ def _run_rpi_gpio() -> None:
         while True:
             time.sleep(0.05)
             with lock:
-                if processing and (time.time() - last_pulse_t > BILL_IDLE_S):
+                if pulse_count > 0 and (time.time() - last_pulse_t > BILL_IDLE_S):
                     amount = pulse_count * BILL_UZS_PER_PULSE
                     print(f"[moyka-hw] принято {amount} UZS ({pulse_count} имп.)", flush=True)
                     _enqueue_cash_uzs(amount)
                     pulse_count = 0
-                    processing = False
     finally:
         GPIO.cleanup()
 
 
+# --- libgpiod 1.x (Radxa — как рабочий скрипт с gpiod.Chip / get_line / event_wait) ---
+
+
+def _run_gpiod() -> None:
+    import gpiod  # type: ignore
+
+    chip_arg = os.environ.get("MOYKA_GPIOD_CHIP", "gpiochip1").strip()
+    chip_path = chip_arg if chip_arg.startswith("/dev/") else f"/dev/{chip_arg}"
+
+    try:
+        bill_off = int(os.environ.get("MOYKA_GPIOD_LINE_BILL", "8"), 0)
+    except ValueError:
+        bill_off = 8
+
+    raw_int = os.environ.get("MOYKA_GPIOD_LINE_INT", "4").strip().lower()
+    int_off: int | None
+    if raw_int in ("", "none", "-1"):
+        int_off = None
+    else:
+        try:
+            int_off = int(raw_int, 0)
+        except ValueError:
+            int_off = 4
+
+    i2c_on = os.environ.get("MOYKA_I2C_ENABLE", "").strip().lower() in ("1", "true", "yes")
+    bit_map = _parse_pcf_button_map()
+
+    try:
+        import smbus2
+    except ImportError:
+        smbus2 = None  # type: ignore
+
+    bus = None
+    if i2c_on and smbus2:
+        try:
+            bus = smbus2.SMBus(I2C_BUS)
+        except Exception as err:
+            print(f"[moyka-hw] I2C SMBus({I2C_BUS}): {err}", flush=True)
+
+    if int_off is not None and bus is None:
+        int_off = None
+
+    try:
+        chip = gpiod.Chip(chip_path)
+    except Exception as err:
+        print(f"[moyka-hw] gpiod.Chip({chip_path}): {err}", flush=True)
+        _run_mock()
+        return
+
+    bill_line = chip.get_line(bill_off)
+    try:
+        bill_line.request(consumer="moyka_nv10", type=gpiod.LINE_REQ_EV_RISING_EDGE)
+    except Exception as err:
+        print(f"[moyka-hw] gpiod bill line {bill_off}: {err}", flush=True)
+        try:
+            chip.close()
+        except Exception:
+            pass
+        _run_mock()
+        return
+
+    int_line = None
+    if int_off is not None and bus is not None:
+        try:
+            int_line = chip.get_line(int_off)
+            int_line.request(consumer="moyka_pcf", type=gpiod.LINE_REQ_EV_FALLING_EDGE)
+        except Exception as err:
+            print(f"[moyka-hw] gpiod INT line {int_off}: {err} — только купюры", flush=True)
+            int_line = None
+
+    pulse_count = 0
+    last_pulse_t = 0.0
+    last_pcf = None
+    lock = threading.Lock()
+
+    def bill_hit() -> None:
+        nonlocal pulse_count, last_pulse_t
+        now = time.time()
+        with lock:
+            if now - last_pulse_t > BILL_DEBOUNCE_S:
+                pulse_count += 1
+                last_pulse_t = now
+
+    def int_hit() -> None:
+        nonlocal last_pcf
+        if bus is None:
+            return
+        try:
+            status = bus.read_byte(I2C_ADDR)
+        except Exception as err:
+            print(f"[moyka-hw] I2C read: {err}", flush=True)
+            return
+        print(f"[moyka-hw] PCF8574 {status:08b}", flush=True)
+        with lock:
+            if last_pcf is not None and bit_map:
+                _emit_pcf_delta(last_pcf, status, bit_map)
+            last_pcf = status
+
+    print(
+        f"[moyka-hw] gpiod: {chip_path} bill_offset={bill_off} (RISING) "
+        f"int={int_off if int_line else '—'} (FALLING)",
+        flush=True,
+    )
+
+    try:
+        while True:
+            if int_line is not None and _gpiod_event_wait(int_line, 0.01):
+                try:
+                    int_line.event_read()
+                except Exception:
+                    pass
+                int_hit()
+
+            if _gpiod_event_wait(bill_line, 0.001):
+                try:
+                    bill_line.event_read()
+                except Exception:
+                    pass
+                bill_hit()
+
+            with lock:
+                if pulse_count > 0 and (time.time() - last_pulse_t > BILL_IDLE_S):
+                    amount = pulse_count * BILL_UZS_PER_PULSE
+                    print(f"[moyka-hw] принято {amount} UZS ({pulse_count} имп.)", flush=True)
+                    _enqueue_cash_uzs(amount)
+                    pulse_count = 0
+
+            time.sleep(0.01)
+    finally:
+        try:
+            bill_line.release()
+        except Exception:
+            pass
+        if int_line is not None:
+            try:
+                int_line.release()
+            except Exception:
+                pass
+        try:
+            chip.close()
+        except Exception:
+            pass
+
+
 # --- python-periphery (Radxa и др. Linux с /dev/gpiochip*) ---
+
+
+def _periphery_bias(name: str, default: str) -> str:
+    v = os.environ.get(name, default).strip().lower()
+    if v in ("pull_down", "pull_up", "disable", "default"):
+        return v
+    return default
 
 
 def _run_periphery() -> None:
@@ -240,6 +433,14 @@ def _run_periphery() -> None:
 
     i2c_on = os.environ.get("MOYKA_I2C_ENABLE", "").strip().lower() in ("1", "true", "yes")
     bit_map = _parse_pcf_button_map()
+    bill_mode = os.environ.get("MOYKA_BILL_MODE", "poll").strip().lower()
+    if bill_mode not in ("poll", "edge"):
+        bill_mode = "poll"
+    try:
+        poll_ms = float(os.environ.get("MOYKA_GPIO_POLL_MS", "0.002"))
+    except ValueError:
+        poll_ms = 0.002
+    poll_ms = max(0.0005, min(poll_ms, 0.05))
 
     bill_name = os.environ.get("MOYKA_GPIO_BILL_NAME", "").strip()
     int_name = os.environ.get("MOYKA_GPIO_INT_NAME", "").strip()
@@ -300,25 +501,46 @@ def _run_periphery() -> None:
         if int_line_no is None and (raw_int or int_name):
             print("[moyka-hw] MOYKA_I2C_ENABLE: не удалось определить линию INT — только купюры", flush=True)
 
-    bill_gpio = GPIO(bill_chip, bill_line_no, "in", bias="pull_down", edge="rising")
+    bill_bias = _periphery_bias("MOYKA_BILL_BIAS", "pull_down")
+    int_bias = _periphery_bias("MOYKA_INT_BIAS", "pull_up")
+    bill_edge = "none" if bill_mode == "poll" else "rising"
+    int_edge = "none" if bill_mode == "poll" else "falling"
+
+    try:
+        bill_gpio = GPIO(bill_chip, bill_line_no, "in", bias=bill_bias, edge=bill_edge)
+    except PermissionError as err:
+        print(
+            f"[moyka-hw] нет доступа к {bill_chip}: {err}\n"
+            "  Запустите от root или добавьте пользователя в группу «gpio», "
+            "проверьте права на /dev/gpiochip*",
+            flush=True,
+        )
+        _run_mock()
+        return
+    except Exception as err:
+        print(f"[moyka-hw] не удалось открыть линию купюр {bill_chip}:{bill_line_no}: {err}", flush=True)
+        _run_mock()
+        return
+
     int_gpio = None
     if bus is not None and int_line_no is not None:
-        int_gpio = GPIO(int_chip, int_line_no, "in", bias="pull_up", edge="falling")
+        try:
+            int_gpio = GPIO(int_chip, int_line_no, "in", bias=int_bias, edge=int_edge)
+        except Exception as err:
+            print(f"[moyka-hw] INT GPIO не открыт: {err} — только купюры", flush=True)
 
     pulse_count = 0
     last_pulse_t = 0.0
-    processing = False
     last_pcf = None
     lock = threading.Lock()
 
     def bill_hit() -> None:
-        nonlocal pulse_count, last_pulse_t, processing
+        nonlocal pulse_count, last_pulse_t
         now = time.time()
         with lock:
             if now - last_pulse_t > BILL_DEBOUNCE_S:
                 pulse_count += 1
                 last_pulse_t = now
-                processing = True
 
     def int_hit() -> None:
         nonlocal last_pcf
@@ -335,36 +557,79 @@ def _run_periphery() -> None:
                 _emit_pcf_delta(last_pcf, status, bit_map)
             last_pcf = status
 
+    try:
+        lvl = bill_gpio.read()
+    except Exception as err:
+        print(f"[moyka-hw] первое чтение линии купюр: {err}", flush=True)
+        bill_gpio.close()
+        _run_mock()
+        return
+
     print(
         f"[moyka-hw] periphery: купюры {bill_chip} line {bill_line_no} "
-        f"(как RPi BOARD pin 40, RISING); INT {int_chip if int_gpio else '—'} "
-        f"{int_line_no if int_gpio else ''}",
+        f"mode={bill_mode} bias={bill_bias} стартовый уровень={'HIGH' if lvl else 'LOW'}; "
+        f"INT {int_chip if int_gpio else '—'} {int_line_no if int_gpio else ''}",
         flush=True,
     )
 
     try:
-        while True:
-            # Ждём событие на любом из пинов (короткий poll по очереди)
-            if bill_gpio.poll(BILL_DEBOUNCE_S if not int_gpio else 0.05):
+        if bill_mode == "poll":
+            prev_bill = bool(lvl)
+            prev_int = True
+            if int_gpio:
                 try:
-                    bill_gpio.read_event()
+                    prev_int = bool(int_gpio.read())
                 except Exception:
-                    pass
-                bill_hit()
-            if int_gpio and int_gpio.poll(0.01):
+                    prev_int = True
+            while True:
                 try:
-                    int_gpio.read_event()
+                    high = bool(bill_gpio.read())
                 except Exception:
-                    pass
-                int_hit()
+                    time.sleep(0.05)
+                    continue
+                if high and not prev_bill:
+                    bill_hit()
+                prev_bill = high
 
-            with lock:
-                if processing and (time.time() - last_pulse_t > BILL_IDLE_S):
-                    amount = pulse_count * BILL_UZS_PER_PULSE
-                    print(f"[moyka-hw] принято {amount} UZS ({pulse_count} имп.)", flush=True)
-                    _enqueue_cash_uzs(amount)
-                    pulse_count = 0
-                    processing = False
+                if int_gpio:
+                    try:
+                        ih = bool(int_gpio.read())
+                    except Exception:
+                        ih = prev_int
+                    if not ih and prev_int:
+                        int_hit()
+                    prev_int = ih
+
+                with lock:
+                    if pulse_count > 0 and (time.time() - last_pulse_t > BILL_IDLE_S):
+                        amount = pulse_count * BILL_UZS_PER_PULSE
+                        print(f"[moyka-hw] принято {amount} UZS ({pulse_count} имп.)", flush=True)
+                        _enqueue_cash_uzs(amount)
+                        pulse_count = 0
+
+                time.sleep(poll_ms)
+        else:
+            while True:
+                if bill_gpio.poll(0.05):
+                    try:
+                        bill_gpio.read_event()
+                    except Exception:
+                        pass
+                    bill_hit()
+                if int_gpio and int_gpio.poll(0.01):
+                    try:
+                        int_gpio.read_event()
+                    except Exception:
+                        pass
+                    int_hit()
+
+                with lock:
+                    if pulse_count > 0 and (time.time() - last_pulse_t > BILL_IDLE_S):
+                        amount = pulse_count * BILL_UZS_PER_PULSE
+                        print(f"[moyka-hw] принято {amount} UZS ({pulse_count} имп.)", flush=True)
+                        _enqueue_cash_uzs(amount)
+                        pulse_count = 0
+                time.sleep(0.001)
     finally:
         bill_gpio.close()
         if int_gpio:
@@ -393,6 +658,8 @@ def start() -> None:
         target = _run_mock
     elif backend == "rpigpio":
         target = _run_rpi_gpio
+    elif backend == "gpiod":
+        target = _run_gpiod
     elif backend == "periphery":
         target = _run_periphery
     else:
@@ -402,12 +669,20 @@ def start() -> None:
             target = _run_rpi_gpio
         except Exception:
             try:
-                import periphery  # type: ignore  # noqa: F401
+                import gpiod  # type: ignore  # noqa: F401
 
-                target = _run_periphery
+                target = _run_gpiod
             except Exception:
-                print("[moyka-hw] нет RPi.GPIO и periphery — режим mock", flush=True)
-                target = _run_mock
+                try:
+                    import periphery  # type: ignore  # noqa: F401
+
+                    target = _run_periphery
+                except Exception:
+                    print(
+                        "[moyka-hw] нет RPi.GPIO, gpiod и periphery — режим mock",
+                        flush=True,
+                    )
+                    target = _run_mock
 
     th = threading.Thread(target=target, name="moyka-hw", daemon=True)
     th.start()
