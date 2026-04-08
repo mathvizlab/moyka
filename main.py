@@ -234,6 +234,7 @@ TRANSLATIONS = {
         "services_save_names": "Apply titles", "service_add": "Add service",
         "new_service_name": "New service", "services_min_one": "At least one service is required",
         "services_order_note": "Technical id (video: static/tutorials/<id>.mp4)",
+        "cash_acceptor_balance": "Inserted (bill acceptor)",
     },
     "rus": {
         "menu_lang": "Язык", "menu_qr": "QR", "menu_cash": "Касса", "menu_info": "Инфо", "tab_lang_title": "Язык",
@@ -264,6 +265,7 @@ TRANSLATIONS = {
         "services_save_names": "Применить названия", "service_add": "Добавить услугу",
         "new_service_name": "Новая услуга", "services_min_one": "Нужна хотя бы одна услуга",
         "services_order_note": "Технический id (ролик static/tutorials/<id>.mp4)",
+        "cash_acceptor_balance": "Внесено (купюроприёмник)",
     },
     "uzb": {
         "menu_lang": "Til", "menu_qr": "QR", "menu_cash": "Kassa", "menu_info": "Ma'lumot", "tab_lang_title": "Til",
@@ -294,6 +296,7 @@ TRANSLATIONS = {
         "services_save_names": "Nomlarni qo'llash", "service_add": "Xizmat qo'shish",
         "new_service_name": "Yangi xizmat", "services_min_one": "Kamida bitta xizmat kerak",
         "services_order_note": "Texnik id (video static/tutorials/<id>.mp4)",
+        "cash_acceptor_balance": "Kiritilgan (kupyur qabul)",
     },
 }
 
@@ -369,6 +372,7 @@ def refresh_all_ui_text():
     update_pause_visuals()
     update_price_bar()
     update_ui()
+    sync_acceptor_balance_cash_tab()
 
 # Refs for labels that need translation refresh
 ui_refs = {}
@@ -383,6 +387,7 @@ info_cards_host_ref = [None]
 display_checks_host_ref = [None]
 services_editor_host_ref = [None]
 total_revenue_label_ref = [None]
+acceptor_balance_cash_tab_ref = [None]  # одна строка «внесено» как на bil.py → баланс
 revenue_value_labels: dict[str, Any] = {}
 services_name_inputs: dict[str, Any] = {}
 service_editor_live_values: dict[str, str] = {}
@@ -775,6 +780,16 @@ def update_revenue_display():
     tr.set_text(f"{format_money(total)} UZS")
 
 
+def sync_acceptor_balance_cash_tab() -> None:
+    """Строка на вкладке «Касса»: сколько UZS на балансе приёма (та же величина, что в шапке с bil.py-логикой)."""
+    lab = acceptor_balance_cash_tab_ref[0]
+    if not lab:
+        return
+    m = int(max(0.0, acceptor_cash_balance_uzs[0]) + 1e-6)
+    cc = currency_code[0]
+    lab.set_text(f"{t('cash_acceptor_balance')}: {format_money(m)} {cc}")
+
+
 def repopulate_cash_tab_rows():
     host = cash_rows_host_ref[0]
     if not host:
@@ -1010,12 +1025,15 @@ def update_ui():
         _last_ui_sub_unit[0] = sub_unit_text
     apply_header_display_visibility()
     update_compact_layout()
+    sync_acceptor_balance_cash_tab()
 
 async def timer_loop():
     dt = BILLING_LOOP_DT_S
     idle_dt = 0.25
     while True:
+        had_hw = False
         for kind, payload in kiosk_hardware.drain_hw_events():
+            had_hw = True
             if kind == "cash":
                 apply_cash_topup(int(payload))
             elif kind == "btn":
@@ -1023,6 +1041,9 @@ async def timer_loop():
                     handle_click(str(payload))
                 except Exception as err:
                     print(f"[moyka] PCF→кнопка: {err}", flush=True)
+        if had_hw and not _client_deleted():
+            # Дублируем обновление экрана: события из потока kiosk_hardware (как bil.py → сумма на UI).
+            update_ui()
         if _client_deleted():
             await asyncio.sleep(idle_dt)
             continue
@@ -1803,6 +1824,13 @@ async def main_page():
                 tab_contents['cash'] = cash_tab
                 lbl = ui.label(t('tab_revenue')).classes('text-yellow-500 font-bold mb-4 text-center').style('font-size: 14px')
                 ui_refs['tab_revenue'] = lbl
+                with ui.row().classes('w-full justify-center mb-3 p-2').style(
+                    'background: #14532d; border-radius: 8px; border: 1px solid #22c55e;'
+                ):
+                    acceptor_balance_cash_tab_ref[0] = ui.label("").classes(
+                        'text-green-300 font-bold text-lg text-center'
+                    )
+                sync_acceptor_balance_cash_tab()
                 cash_rows_host_ref[0] = ui.column().classes('w-full')
                 ui.separator().classes('my-4')
                 with ui.row().classes('w-full justify-between items-center p-3').style('background: #0f172a; border: 2px solid var(--primary); border-radius: 8px;'):
@@ -2035,6 +2063,30 @@ def _on_client_disconnect(client=None) -> None:
 app.on_disconnect(_on_client_disconnect)
 
 
+def _apply_hw_env_match_bil_defaults() -> None:
+    """
+    Те же относительные настройки, что у рабочего bil.py (без импорта bil.py): опрос, debounce, idle, сумма за импульс.
+    setdefault — явный env и MOYKA_PRESET важнее. Отключить: MOYKA_SKIP_BIL_HW_DEFAULTS=1.
+    """
+    if not kiosk_hardware.hw_enabled():
+        return
+    if os.environ.get("MOYKA_SKIP_BIL_HW_DEFAULTS", "").strip().lower() in ("1", "true", "yes", "on"):
+        return
+    preset = os.environ.get("MOYKA_PRESET", "").strip().lower()
+    zero2 = preset in ("radxa_zero2", "radxa-zero-2", "radxa_zero_2")
+    has_line = bool(os.environ.get("MOYKA_LINE_BILL", "").strip())
+    has_name = bool(os.environ.get("MOYKA_GPIO_BILL_NAME", "").strip())
+    if not has_line and not has_name and not zero2:
+        os.environ.setdefault("MOYKA_GPIOCHIP", "/dev/gpiochip1")
+        os.environ.setdefault("MOYKA_LINE_BILL", "11")
+    os.environ.setdefault("MOYKA_BILL_DEBOUNCE_S", "0.03")
+    os.environ.setdefault("MOYKA_BILL_IDLE_S", "0.8")
+    os.environ.setdefault("MOYKA_BILL_UZS_PER_PULSE", "1000")
+    os.environ.setdefault("MOYKA_GPIO_POLL_MS", "0.002")
+    os.environ.setdefault("MOYKA_BILL_BIAS", "pull_down")
+    os.environ.setdefault("MOYKA_INT_BIAS", "pull_up")
+
+
 def _app_startup() -> None:
     if kiosk_hardware.hw_enabled():
         print("[moyka] MOYKA_HW=1 — поток купюроприёмника/I2C стартует", flush=True)
@@ -2043,6 +2095,7 @@ def _app_startup() -> None:
             "[moyka] купюры только при MOYKA_HW=1 (и GPIO на Radxa). Сейчас приём отключён.",
             flush=True,
         )
+    _apply_hw_env_match_bil_defaults()
     try:
         kiosk_hardware.start()
     except Exception as err:

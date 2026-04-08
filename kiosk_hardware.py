@@ -162,7 +162,8 @@ def _apply_hw_presets() -> None:
         os.environ.setdefault("MOYKA_I2C_ADDR", "0x20")
         os.environ.setdefault("MOYKA_I2C_BUS", "1")
         if not os.environ.get("MOYKA_LINE_BILL") and not shutil.which("gpiofind"):
-            os.environ.setdefault("MOYKA_GPIOCHIP", "/dev/gpiochip0")
+            # Как bil.py без gpiofind: /dev/gpiochip1 offset 11 (pin 40 на типичном Radxa Zero).
+            os.environ.setdefault("MOYKA_GPIOCHIP", "/dev/gpiochip1")
             os.environ.setdefault("MOYKA_LINE_BILL", "11")
             os.environ.setdefault("MOYKA_LINE_I2C_INT", "3")
 
