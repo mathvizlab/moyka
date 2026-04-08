@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Тест NV10 → PC817 → GPIO (Radxa Zero: pin 40 → gpiochip1 offset 11).
-Запуск: sudo -E ./venv/bin/python3 bil.py  (см. MOYKA_* в коде).
+NV10 → PC817 → GPIO (физ. pin 40). См. MOYKA_* внизу файла и gpiofind PIN_40.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 import time
 
@@ -27,20 +28,67 @@ except ImportError:
     sys.exit(1)
 
 # --- настройки из окружения ---
-# Физ. 40-й контакт → на вашей плате offset 11 (libgpiod / periphery)
-CHIP = os.environ.get("MOYKA_GPIOCHIP", "/dev/gpiochip1").strip()
-try:
-    LINE = int(os.environ.get("MOYKA_GPIO_LINE", os.environ.get("MOYKA_LINE_BILL", "11")), 0)
-except ValueError:
-    print("MOYKA_GPIO_LINE должен быть числом", file=sys.stderr)
-    sys.exit(1)
+# Дефолт — типичная связка для одной из сборок Radxa Zero (не для всех ревизий).
+_DEFAULT_CHIP = "/dev/gpiochip1"
+_DEFAULT_LINE = 11
+
+
+def _gpiofind_line(name: str) -> tuple[str, int] | None:
+    """gpiofind из пакета gpiod → (/dev/gpiochipN, offset)."""
+    gf = shutil.which("gpiofind")
+    if not gf or not name.strip():
+        return None
+    try:
+        out = subprocess.check_output(
+            [gf, name.strip()],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    parts = out.split()
+    if len(parts) != 2 or not parts[0].startswith("gpiochip"):
+        return None
+    try:
+        return "/dev/" + parts[0], int(parts[1], 0)
+    except ValueError:
+        return None
+
+
+_line_name = (
+    os.environ.get("MOYKA_GPIO_LINE_NAME", "").strip()
+    or os.environ.get("MOYKA_GPIOFIND", "").strip()
+)
+if _line_name:
+    _resolved = _gpiofind_line(_line_name)
+    if not _resolved:
+        print(
+            f"MOYKA_GPIO_LINE_NAME={_line_name!r}: gpiofind не вернул линию.\n"
+            "Установите gpiod (apt: gpiod) и проверьте имя: gpiofind "
+            f"{_line_name}\n"
+            "Либо задайте вручную MOYKA_GPIOCHIP и MOYKA_GPIO_LINE (число).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    CHIP, LINE = _resolved
+else:
+    CHIP = os.environ.get("MOYKA_GPIOCHIP", _DEFAULT_CHIP).strip()
+    try:
+        LINE = int(
+            os.environ.get("MOYKA_GPIO_LINE", os.environ.get("MOYKA_LINE_BILL", str(_DEFAULT_LINE))),
+            0,
+        )
+    except ValueError:
+        print("MOYKA_GPIO_LINE должен быть числом", file=sys.stderr)
+        sys.exit(1)
 
 EDGE = os.environ.get("MOYKA_EDGE", "falling").strip().lower()
 if EDGE not in ("rising", "falling"):
     EDGE = "falling"
 
-# pull_up + falling (PC817 коллектор к GPIO, эмиттер GND, внешняя или внутр. подтяжка к 3.3V)
-# pull_down + rising — если схема наоборот
+# falling + pull_up: покой HIGH, импульс тянет линию к GND (коллектор к GPIO, эмиттер GND, подтяжка к 3.3V).
+# rising + pull_down: покой LOW, импульс подаёт на GPIO «единицу» (как у вас: вспышка + ~3 В на ножке).
 BIAS = "pull_up" if EDGE == "falling" else "pull_down"
 
 try:
@@ -53,6 +101,10 @@ IDLE_S = float(os.environ.get("MOYKA_IDLE_S", "0.8"))
 POLL_S = float(os.environ.get("MOYKA_POLL_S", "0.002"))
 # 1 — печатать каждый импульс сразу (проверка проводки); 2 — ещё и каждую смену уровня (шумно)
 DEBUG = int(os.environ.get("MOYKA_DEBUG", "0"), 0)
+# Печатать текущий уровень каждые N секунд (например 0.25) — видно, меняется ли GPIO при внесении купюры
+WATCH_S = float(os.environ.get("MOYKA_WATCH_S", "0"))
+if WATCH_S < 0:
+    WATCH_S = 0.0
 
 if POLL_S < 0.0005:
     POLL_S = 0.0005
@@ -100,25 +152,35 @@ def main() -> None:
         raise
     prev = bool(gpio.read())
     dbg = f"  DEBUG={DEBUG}" if DEBUG else ""
+    src = f"  линия из gpiofind: {_line_name!r}\n" if _line_name else ""
     print(
         f"Купюры NV10→PC817→GPIO\n"
         f"  chip={CHIP}  line(offset)={LINE}  edge={EDGE}  bias={BIAS}\n"
+        f"{src}"
         f"  стартовый уровень: {'HIGH' if prev else 'LOW'}\n"
         f"  UZS за импульс={UZS_PULSE}  debounce={DEBOUNCE_S}s  конец купюры после тишины {IDLE_S}s\n"
         f"  опрос каждые {POLL_S * 1000:.1f} ms{dbg}\n"
         f"Ctrl+C — выход\n"
-        f"Подсказка: если при внесении купюры тишина — MOYKA_DEBUG=1 (см. импульсы), "
-        f"MOYKA_DEBUG=2 (любая смена уровня), MOYKA_EDGE=rising, MOYKA_POLL_S=0.0005; "
-        f"проверьте провод на pin40/line11 и что у NV10 включён импульсный выход.\n",
+        f"Подсказка: на 40-й ножке во время импульса видите ~3 В — попробуйте MOYKA_EDGE=rising "
+        f"(и MOYKA_POLL_S=0.0005). Нет ни [уровень], ни смены в [watch] — неверная линия: "
+        f"gpiofind PIN_40 → MOYKA_GPIO_LINE_NAME=PIN_40. Общий GND: плата и NV10.\n",
         flush=True,
     )
+    if WATCH_S > 0:
+        print(f"  MOYKA_WATCH_S={WATCH_S}: каждые {WATCH_S}s строка [watch] с уровнем GPIO\n", flush=True)
 
     pulse_count = 0
     last_pulse_t = 0.0
+    last_watch_t = 0.0
 
     try:
         while True:
             x = bool(gpio.read())
+            if WATCH_S > 0:
+                tnow = time.time()
+                if tnow - last_watch_t >= WATCH_S:
+                    last_watch_t = tnow
+                    print(f"  [watch] {'HIGH' if x else 'LOW'}", flush=True)
             if DEBUG >= 2 and x != prev:
                 print(f"  [уровень] {'HIGH' if x else 'LOW'}", flush=True)
             if EDGE == "rising":

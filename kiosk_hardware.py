@@ -25,13 +25,19 @@
 
   # Radxa Zero (S905Y2), тот же 40-pin расклад что у Pi — купюра на pin 40, INT PCF на pin 7:
   MOYKA_PRESET=radxa_zero
-      → periphery + MOYKA_BILL_MODE=poll (важно: на Radxa edge-события часто «молчат», Pi — RPi.GPIO)
+      → periphery + MOYKA_BILL_MODE=poll (S905Y2: имена GPIOAO_*; см. gpiofind)
+  MOYKA_PRESET=radxa_zero2
+      → как radxa_zero, но купюры по имени PIN_40 (док. Radxa Zero 2 / GPIOD); линию INT задайте
+        через MOYKA_GPIO_INT_NAME или MOYKA_LINE_I2C_INT после gpioinfo
   MOYKA_BILL_MODE=poll|edge   # poll = опрос уровня (по умолчанию для radxa_zero); edge = старый вариант
   MOYKA_GPIO_POLL_MS=0.002    # период опроса линии купюр, сек
 
-  Если установлен gpiofind (пакет gpiod), линии ищутся по имени; иначе задайте вручную:
+  Если установлен gpiofind (пакет gpiod), линии ищутся по имени; иначе задайте вручную.
+  В доке Radxa (GPIOD) для Zero 2 у физ. pin 40 имя часто PIN_40 → gpiochip0 offset 7;
+  на других Zero встречается GPIOAO_11 и другой gpiochip — сверяйте: gpioinfo | grep PIN_40
+
   MOYKA_GPIOCHIP=/dev/gpiochip0
-  MOYKA_LINE_BILL=11         # GPIOAO_11 → физ. pin 40 (импульсы купюр, RISING, pull-down)
+  MOYKA_LINE_BILL=11         # пример: GPIOAO_11 на одной из сборок; число смотрите gpiofind/gpioinfo
   MOYKA_LINE_I2C_INT=3       # GPIOAO_3 → физ. pin 7 (FALLING, pull-up, чтение PCF8574)
 
   Либо явные имена для gpiofind:
@@ -40,9 +46,9 @@
 
   Права: пользователь должен читать /dev/gpiochip* (группа gpio или root).
 
-  # --- Ваш Radxa Zero (libgpiod): gpiochip1, offset 8 = купюры (RISING), 4 = INT PCF (FALLING) ---
+  # --- Radxa Zero (libgpiod): gpiochip1, offset 11 = купюры, 4 = INT PCF (пример, проверьте gpiofind) ---
   MOYKA_PRESET=radxa_zero_gpiod
-      → MOYKA_GPIO_BACKEND=gpiod, chip gpiochip1, линии 8 / 4, I2C шина 1
+      → MOYKA_GPIO_BACKEND=gpiod, chip gpiochip1, линии 11 / 4, I2C шина 1
   MOYKA_GPIOD_CHIP=gpiochip1      # или /dev/gpiochip1
   MOYKA_GPIOD_LINE_BILL=11      # физ. pin 40 → offset 11 (ваша разводка)
   MOYKA_GPIOD_LINE_INT=4          # GPIOAO_4 — INT; пусто / none — только купюры
@@ -151,6 +157,15 @@ def _apply_hw_presets() -> None:
             os.environ.setdefault("MOYKA_GPIOCHIP", "/dev/gpiochip0")
             os.environ.setdefault("MOYKA_LINE_BILL", "11")
             os.environ.setdefault("MOYKA_LINE_I2C_INT", "3")
+
+    if p in ("radxa_zero2", "radxa-zero-2", "radxa_zero_2"):
+        # Док. Radxa GPIOD: gpiofind PIN_40 → часто gpiochip0, offset 7 (не путать с S905Y2 / GPIOAO_11).
+        os.environ.setdefault("MOYKA_GPIO_BACKEND", "periphery")
+        os.environ.setdefault("MOYKA_BILL_MODE", "poll")
+        os.environ.setdefault("MOYKA_GPIO_BILL_NAME", "PIN_40")
+        os.environ.setdefault("MOYKA_I2C_ENABLE", "1")
+        os.environ.setdefault("MOYKA_I2C_ADDR", "0x20")
+        os.environ.setdefault("MOYKA_I2C_BUS", "1")
 
     if p in ("radxa_zero_gpiod", "radxa_gpiod"):
         os.environ.setdefault("MOYKA_GPIO_BACKEND", "gpiod")
