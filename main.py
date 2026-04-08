@@ -392,6 +392,8 @@ DEFAULT_SESSION_SECONDS = 30 * 60
 remaining_seconds = [0]  # source of truth for time; 0 = no session
 # Остаток суммы по приёму купюр (UZS). На экране показывается только он; без пополнений = 0.
 acceptor_cash_balance_uzs = [0.0]
+# Купюры приняты до выбора режима / при тарифе 0 — нужно добавить секунды при выборе услуги.
+acceptor_pending_time_credit = [False]
 active_btn_id = [None]
 is_paused = [True]
 display_mode = [0]  # 0 = TIME big, 1 = MONEY big
@@ -1079,6 +1081,7 @@ def stop_everything():
     active_btn_id[0] = None
     remaining_seconds[0] = 0
     acceptor_cash_balance_uzs[0] = 0.0
+    acceptor_pending_time_credit[0] = False
     notify("Session ended — time reached 0")
     refresh_button_visuals()
     update_price_bar()
@@ -1100,6 +1103,7 @@ def handle_click(bid):
         return
     start_session_if_needed(bid)
     switch_service(bid)
+    flush_pending_acceptor_to_time()
     if is_paused[0]:
         set_running(True)
     update_ui()
@@ -1225,22 +1229,64 @@ def format_money(amount):
     return f"{int(amount):,}".replace(",", " ")
 
 
-def apply_cash_topup(amount_uzs: int) -> None:
-    """Купюроприёмник: добавить время с учётом бонуса % (только пополнение)."""
-    if amount_uzs <= 0:
+def flush_pending_acceptor_to_time() -> None:
+    """Добавить секунды по уже принятой сумме, когда выбран режим (или после «лишней» купюры без тарифа)."""
+    if not acceptor_pending_time_credit[0]:
         return
     bid = active_btn_id[0]
     if not bid or bid not in service_config:
-        notify(t("topup_need_service"))
         return
     rate = get_current_price_per_second()
     if rate <= 0:
-        notify("Top-up: 0 UZS/min — нельзя перевести сумму во время")
         return
-    total_sec = int((float(amount_uzs) / rate) * bonus_multiplier() + 1e-6)
-    if total_sec <= 0:
+    bal = float(acceptor_cash_balance_uzs[0])
+    if bal <= 0:
+        acceptor_pending_time_credit[0] = False
+        return
+    extra = int((bal / rate) * bonus_multiplier() + 1e-6)
+    acceptor_pending_time_credit[0] = False
+    if extra > 0:
+        remaining_seconds[0] += extra
+        if not is_paused[0] and remaining_seconds[0] > 0:
+            _sync_running_phase()
+        notify(f"{t('topup_done')}: {format_money(int(bal + 0.5))} {currency_code[0]} → +{extra}s")
+        save_app_state()
+        update_price_bar()
+
+
+def apply_cash_topup(amount_uzs: int) -> None:
+    """Купюроприёмник: сумма всегда на баланс для экрана; время — если выбран режим и тариф > 0."""
+    if amount_uzs <= 0:
         return
     acceptor_cash_balance_uzs[0] += float(amount_uzs)
+    print(
+        f"[moyka] купюры +{amount_uzs} UZS, на экране приём: {int(acceptor_cash_balance_uzs[0] + 0.5)}",
+        flush=True,
+    )
+
+    bid = active_btn_id[0]
+    if not bid or bid not in service_config:
+        acceptor_pending_time_credit[0] = True
+        save_app_state()
+        update_price_bar()
+        notify(f"+{format_money(amount_uzs)} {currency_code[0]} — {t('topup_need_service')}")
+        update_ui()
+        return
+
+    rate = get_current_price_per_second()
+    if rate <= 0:
+        acceptor_pending_time_credit[0] = True
+        save_app_state()
+        update_price_bar()
+        notify(f"+{format_money(amount_uzs)} {currency_code[0]} — тариф 0, время не добавлено")
+        update_ui()
+        return
+
+    total_sec = int((float(amount_uzs) / rate) * bonus_multiplier() + 1e-6)
+    if total_sec <= 0:
+        save_app_state()
+        update_ui()
+        return
     remaining_seconds[0] += total_sec
     if not is_paused[0] and remaining_seconds[0] > 0:
         _sync_running_phase()
@@ -1273,6 +1319,7 @@ def build_app_state():
         "lang": current_lang[0],
         "display_mode": int(display_mode[0]),
         "acceptor_cash_balance_uzs": float(acceptor_cash_balance_uzs[0]),
+        "acceptor_pending_time_credit": bool(acceptor_pending_time_credit[0]),
     }
 
 def save_app_state():
@@ -1357,6 +1404,7 @@ def _apply_loaded_state(state_json: str):
         acceptor_cash_balance_uzs[0] = max(0.0, ac)
     except Exception:
         pass
+    acceptor_pending_time_credit[0] = bool(data.get("acceptor_pending_time_credit", False))
     vis = data.get("service_button_visible")
     if isinstance(vis, dict):
         for bid in service_button_order:
@@ -1988,6 +2036,13 @@ app.on_disconnect(_on_client_disconnect)
 
 
 def _app_startup() -> None:
+    if kiosk_hardware.hw_enabled():
+        print("[moyka] MOYKA_HW=1 — поток купюроприёмника/I2C стартует", flush=True)
+    else:
+        print(
+            "[moyka] купюры только при MOYKA_HW=1 (и GPIO на Radxa). Сейчас приём отключён.",
+            flush=True,
+        )
     try:
         kiosk_hardware.start()
     except Exception as err:
