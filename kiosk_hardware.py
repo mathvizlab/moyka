@@ -44,7 +44,7 @@
   MOYKA_PRESET=radxa_zero_gpiod
       → MOYKA_GPIO_BACKEND=gpiod, chip gpiochip1, линии 8 / 4, I2C шина 1
   MOYKA_GPIOD_CHIP=gpiochip1      # или /dev/gpiochip1
-  MOYKA_GPIOD_LINE_BILL=8         # GPIOH_8 — NV10
+  MOYKA_GPIOD_LINE_BILL=11      # физ. pin 40 → offset 11 (ваша разводка)
   MOYKA_GPIOD_LINE_INT=4          # GPIOAO_4 — INT; пусто / none — только купюры
   (на Radxa проверьте шину: ls /dev/i2c* → MOYKA_I2C_BUS=1 или 7)
 
@@ -155,7 +155,7 @@ def _apply_hw_presets() -> None:
     if p in ("radxa_zero_gpiod", "radxa_gpiod"):
         os.environ.setdefault("MOYKA_GPIO_BACKEND", "gpiod")
         os.environ.setdefault("MOYKA_GPIOD_CHIP", "gpiochip1")
-        os.environ.setdefault("MOYKA_GPIOD_LINE_BILL", "8")
+        os.environ.setdefault("MOYKA_GPIOD_LINE_BILL", "11")
         os.environ.setdefault("MOYKA_GPIOD_LINE_INT", "4")
         os.environ.setdefault("MOYKA_I2C_ENABLE", "1")
         os.environ.setdefault("MOYKA_I2C_ADDR", "0x20")
@@ -284,7 +284,7 @@ def _run_gpiod() -> None:
     chip_path = chip_arg if chip_arg.startswith("/dev/") else f"/dev/{chip_arg}"
 
     try:
-        bill_off = int(os.environ.get("MOYKA_GPIOD_LINE_BILL", "8"), 0)
+        bill_off = int(os.environ.get("MOYKA_GPIOD_LINE_BILL", "11"), 0)
     except ValueError:
         bill_off = 8
 

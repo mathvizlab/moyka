@@ -13,6 +13,15 @@
   cd ~/Desktop/moyka   # ваш каталог
   sudo -E ./venv/bin/python3 bil.py
   (-E сохраняет MOYKA_*; ./venv/bin/python3 — тот же Python, где стоит periphery)
+
+Если «Device or resource busy» (EBUSY) — линия GPIO уже занята:
+  • остановите main.py (мойка), другой bil.py, тесты GPIO;
+  • pgrep -af python
+  • sudo fuser -v /dev/gpiochip1
+  • проверьте /sys/class/gpio (старый экспорт линии)
+
+По умолчанию под вашу разводку: физический pin 40 → offset линии 11 на gpiochip1
+(переопределение: MOYKA_GPIO_LINE=… и при необходимости MOYKA_GPIOCHIP=…).
 """
 
 from __future__ import annotations
@@ -37,9 +46,10 @@ except ImportError:
     sys.exit(1)
 
 # --- настройки из окружения ---
+# Физ. 40-й контакт → на вашей плате offset 11 (libgpiod / periphery)
 CHIP = os.environ.get("MOYKA_GPIOCHIP", "/dev/gpiochip1").strip()
 try:
-    LINE = int(os.environ.get("MOYKA_GPIO_LINE", os.environ.get("MOYKA_LINE_BILL", "8")), 0)
+    LINE = int(os.environ.get("MOYKA_GPIO_LINE", os.environ.get("MOYKA_LINE_BILL", "11")), 0)
 except ValueError:
     print("MOYKA_GPIO_LINE должен быть числом", file=sys.stderr)
     sys.exit(1)
@@ -71,27 +81,40 @@ def main() -> None:
     try:
         gpio = GPIO(CHIP, LINE, "in", bias=BIAS, edge="none")
     except Exception as e:
-        # periphery часто кидает GPIOError вокруг Errno 13
-        if not (
-            isinstance(e, PermissionError)
-            or getattr(e, "errno", None) == 13
-            or "ermission denied" in str(e).lower()
-        ):
-            raise
+        eno = getattr(e, "errno", None)
+        low = str(e).lower()
         py = sys.executable
-        print(
-            f"Нет доступа к {CHIP}: {e}\n\n"
-            "Сделайте одно из:\n"
-            "  1) sudo usermod -aG gpio $USER  →  перелогиньтесь, затем без sudo:\n"
-            f"       {py} bil.py\n"
-            "  2) newgrp gpio\n"
-            f"  3) разовая проверка с root, но тем же Python (чтобы был periphery из venv):\n"
-            f"       sudo -E {py} bil.py\n\n"
-            "Не используйте просто «sudo python3» — это другой интерпретатор.\n"
-            "Права на устройство: ls -l /dev/gpiochip*",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+
+        # EBUSY: линия уже открыта другим процессом (main.py, второй bil, libgpiod)
+        if eno == 16 or "busy" in low or "resource busy" in low:
+            print(
+                f"Линия занята (EBUSY): {CHIP} offset {LINE}\n{e}\n\n"
+                "Остановите всё, что может держать GPIO:\n"
+                "  • systemd-сервис мойки (main.py), другой терминал с bil.py\n"
+                "  • pgrep -af 'python|nicegui'\n"
+                f"  • sudo fuser -v {CHIP}\n"
+                "  • ls /sys/class/gpio  (если есть export — освободите линию)\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # periphery часто кидает GPIOError вокруг Errno 13
+        if isinstance(e, PermissionError) or eno == 13 or "ermission denied" in low:
+            print(
+                f"Нет доступа к {CHIP}: {e}\n\n"
+                "Сделайте одно из:\n"
+                "  1) sudo usermod -aG gpio $USER  →  перелогиньтесь, затем без sudo:\n"
+                f"       {py} bil.py\n"
+                "  2) newgrp gpio\n"
+                f"  3) разовая проверка с root, но тем же Python (чтобы был periphery из venv):\n"
+                f"       sudo -E {py} bil.py\n\n"
+                "Не используйте просто «sudo python3» — это другой интерпретатор.\n"
+                "Права на устройство: ls -l /dev/gpiochip*",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        raise
     prev = bool(gpio.read())
     print(
         f"Купюры NV10→PC817→GPIO\n"
