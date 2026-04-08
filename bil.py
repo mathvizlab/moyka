@@ -1,27 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Если видите Permission denied на /dev/gpiochip* (Debian / Radxa):
-
-  sudo usermod -aG gpio $USER
-  # выйти из сессии и зайти снова (или: newgrp gpio)
-
-Проверка прав:
-  ls -l /dev/gpiochip*
-
-Временно от root (только для теста) — важно: sudo python3 это НЕ venv.
-  cd ~/Desktop/moyka   # ваш каталог
-  sudo -E ./venv/bin/python3 bil.py
-  (-E сохраняет MOYKA_*; ./venv/bin/python3 — тот же Python, где стоит periphery)
-
-Если «Device or resource busy» (EBUSY) — линия GPIO уже занята:
-  • остановите main.py (мойка), другой bil.py, тесты GPIO;
-  • pgrep -af python
-  • sudo fuser -v /dev/gpiochip1
-  • проверьте /sys/class/gpio (старый экспорт линии)
-
-По умолчанию под вашу разводку: физический pin 40 → offset линии 11 на gpiochip1
-(переопределение: MOYKA_GPIO_LINE=… и при необходимости MOYKA_GPIOCHIP=…).
+Тест NV10 → PC817 → GPIO (Radxa Zero: pin 40 → gpiochip1 offset 11).
+Запуск: sudo -E ./venv/bin/python3 bil.py  (см. MOYKA_* в коде).
 """
 
 from __future__ import annotations
@@ -70,6 +51,8 @@ except ValueError:
 DEBOUNCE_S = float(os.environ.get("MOYKA_DEBOUNCE_S", "0.03"))
 IDLE_S = float(os.environ.get("MOYKA_IDLE_S", "0.8"))
 POLL_S = float(os.environ.get("MOYKA_POLL_S", "0.002"))
+# 1 — печатать каждый импульс сразу (проверка проводки); 2 — ещё и каждую смену уровня (шумно)
+DEBUG = int(os.environ.get("MOYKA_DEBUG", "0"), 0)
 
 if POLL_S < 0.0005:
     POLL_S = 0.0005
@@ -116,12 +99,17 @@ def main() -> None:
 
         raise
     prev = bool(gpio.read())
+    dbg = f"  DEBUG={DEBUG}" if DEBUG else ""
     print(
         f"Купюры NV10→PC817→GPIO\n"
         f"  chip={CHIP}  line(offset)={LINE}  edge={EDGE}  bias={BIAS}\n"
         f"  стартовый уровень: {'HIGH' if prev else 'LOW'}\n"
         f"  UZS за импульс={UZS_PULSE}  debounce={DEBOUNCE_S}s  конец купюры после тишины {IDLE_S}s\n"
-        f"Ctrl+C — выход\n",
+        f"  опрос каждые {POLL_S * 1000:.1f} ms{dbg}\n"
+        f"Ctrl+C — выход\n"
+        f"Подсказка: если при внесении купюры тишина — MOYKA_DEBUG=1 (см. импульсы), "
+        f"MOYKA_DEBUG=2 (любая смена уровня), MOYKA_EDGE=rising, MOYKA_POLL_S=0.0005; "
+        f"проверьте провод на pin40/line11 и что у NV10 включён импульсный выход.\n",
         flush=True,
     )
 
@@ -131,6 +119,8 @@ def main() -> None:
     try:
         while True:
             x = bool(gpio.read())
+            if DEBUG >= 2 and x != prev:
+                print(f"  [уровень] {'HIGH' if x else 'LOW'}", flush=True)
             if EDGE == "rising":
                 hit = x and not prev
             else:
@@ -142,6 +132,8 @@ def main() -> None:
                 if now - last_pulse_t >= DEBOUNCE_S:
                     pulse_count += 1
                     last_pulse_t = now
+                    if DEBUG >= 1:
+                        print(f"  [импульс #{pulse_count}] t={now:.3f}", flush=True)
 
             if pulse_count > 0 and (time.time() - last_pulse_t > IDLE_S):
                 total = pulse_count * UZS_PULSE
