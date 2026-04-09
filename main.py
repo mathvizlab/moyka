@@ -253,7 +253,7 @@ TRANSLATIONS = {
         "services_save_names": "Apply titles", "service_add": "Add service",
         "new_service_name": "New service", "services_min_one": "At least one service is required",
         "services_order_note": "Technical id (video: static/tutorials/<id>.mp4)",
-        "cash_acceptor_balance": "Inserted (bill acceptor)",
+        "cash_acceptor_balance": "Inserted this session (bills)",
     },
     "rus": {
         "menu_lang": "Язык", "menu_qr": "QR", "menu_cash": "Касса", "menu_info": "Инфо", "tab_lang_title": "Язык",
@@ -284,7 +284,7 @@ TRANSLATIONS = {
         "services_save_names": "Применить названия", "service_add": "Добавить услугу",
         "new_service_name": "Новая услуга", "services_min_one": "Нужна хотя бы одна услуга",
         "services_order_note": "Технический id (ролик static/tutorials/<id>.mp4)",
-        "cash_acceptor_balance": "Внесено (купюроприёмник)",
+        "cash_acceptor_balance": "Внесено за сеанс (купюры)",
     },
     "uzb": {
         "menu_lang": "Til", "menu_qr": "QR", "menu_cash": "Kassa", "menu_info": "Ma'lumot", "tab_lang_title": "Til",
@@ -315,7 +315,7 @@ TRANSLATIONS = {
         "services_save_names": "Nomlarni qo'llash", "service_add": "Xizmat qo'shish",
         "new_service_name": "Yangi xizmat", "services_min_one": "Kamida bitta xizmat kerak",
         "services_order_note": "Texnik id (video static/tutorials/<id>.mp4)",
-        "cash_acceptor_balance": "Kiritilgan (kupyur qabul)",
+        "cash_acceptor_balance": "Sessiyada kiritilgan (kupyura)",
     },
 }
 
@@ -414,8 +414,10 @@ service_editor_live_values: dict[str, str] = {}
 # --- СИСТЕМНАЯ ЛОГИКА ---
 DEFAULT_SESSION_SECONDS = 30 * 60
 remaining_seconds = [0]  # source of truth for time; 0 = no session
-# Остаток суммы по приёму купюр (UZS). На экране показывается только он; без пополнений = 0.
+# Остаток по купюрам для посекундного списания (во время мойки убывает каждую секунду).
 acceptor_cash_balance_uzs = [0.0]
+# Сумма всех принятых купюр за текущий сеанс — именно её показываем под временем (как «1000, потом 2000»).
+session_cash_inserted_uzs = [0.0]
 # Купюры приняты до выбора режима / при тарифе 0 — нужно добавить секунды при выборе услуги.
 acceptor_pending_time_credit = [False]
 active_btn_id = [None]
@@ -800,11 +802,11 @@ def update_revenue_display():
 
 
 def sync_acceptor_balance_cash_tab() -> None:
-    """Строка на вкладке «Касса»: сколько UZS на балансе приёма (та же величина, что в шапке с bil.py-логикой)."""
+    """Вкладка «Касса»: внесено за сеанс (та же цифра, что под временем)."""
     lab = acceptor_balance_cash_tab_ref[0]
     if not lab:
         return
-    m = int(max(0.0, acceptor_cash_balance_uzs[0]) + 1e-6)
+    m = int(max(0.0, session_cash_inserted_uzs[0]) + 1e-6)
     cc = currency_code[0]
     lab.set_text(f"{t('cash_acceptor_balance')}: {format_money(m)} {cc}")
 
@@ -1014,8 +1016,8 @@ def update_ui():
     minutes = sec // 60
     seconds = sec % 60
     time_str = f"{minutes:02d}:{seconds:02d}"
-    # Сумма на экране только из купюроприёмника (остаток); без приёма — 0.
-    money = int(max(0.0, acceptor_cash_balance_uzs[0]) + 1e-6)
+    # Под временем — всего внесено за сеанс (не «остаток после списания за секунды»).
+    money = int(max(0.0, session_cash_inserted_uzs[0]) + 1e-6)
     formatted_money = f"{money:,}".replace(",", " ")
 
     if display_mode[0] == 0:
@@ -1121,6 +1123,7 @@ def stop_everything():
     active_btn_id[0] = None
     remaining_seconds[0] = 0
     acceptor_cash_balance_uzs[0] = 0.0
+    session_cash_inserted_uzs[0] = 0.0
     acceptor_pending_time_credit[0] = False
     notify("Session ended — time reached 0")
     refresh_button_visuals()
@@ -1299,8 +1302,10 @@ def apply_cash_topup(amount_uzs: int) -> None:
     if amount_uzs <= 0:
         return
     acceptor_cash_balance_uzs[0] += float(amount_uzs)
+    session_cash_inserted_uzs[0] += float(amount_uzs)
     print(
-        f"[moyka] купюры +{amount_uzs} UZS, на экране приём: {int(acceptor_cash_balance_uzs[0] + 0.5)}",
+        f"[moyka] купюры +{amount_uzs} UZS, остаток для тарифа: {int(acceptor_cash_balance_uzs[0] + 0.5)}, "
+        f"внесено за сеанс: {int(session_cash_inserted_uzs[0] + 0.5)}",
         flush=True,
     )
 
@@ -1359,6 +1364,7 @@ def build_app_state():
         "lang": current_lang[0],
         "display_mode": int(display_mode[0]),
         "acceptor_cash_balance_uzs": float(acceptor_cash_balance_uzs[0]),
+        "session_cash_inserted_uzs": float(session_cash_inserted_uzs[0]),
         "acceptor_pending_time_credit": bool(acceptor_pending_time_credit[0]),
     }
 
@@ -1442,6 +1448,11 @@ def _apply_loaded_state(state_json: str):
     try:
         ac = float(data.get("acceptor_cash_balance_uzs", 0.0))
         acceptor_cash_balance_uzs[0] = max(0.0, ac)
+    except Exception:
+        pass
+    try:
+        si = float(data.get("session_cash_inserted_uzs", data.get("acceptor_cash_balance_uzs", 0.0)))
+        session_cash_inserted_uzs[0] = max(0.0, si)
     except Exception:
         pass
     acceptor_pending_time_credit[0] = bool(data.get("acceptor_pending_time_credit", False))
