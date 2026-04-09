@@ -7,6 +7,7 @@
   • periphery — /dev/gpiochip* + опрос линии (MOYKA_PRESET=radxa_zero)
 
 Включение: MOYKA_HW=1
+  MOYKA_HW_DEBUG=1 или 2 — подробный лог в консоль (очередь, импульсы)
 
 Переменные окружения (основные):
   MOYKA_HW=1
@@ -98,6 +99,21 @@ def hw_enabled() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def hw_debug_level() -> int:
+    """0 — тихо; 1 — очередь cash, старт backend; 2 — каждый импульс на линии купюр."""
+    v = os.environ.get("MOYKA_HW_DEBUG", "0").strip().lower()
+    if v in ("", "0", "false", "no", "off"):
+        return 0
+    if v in ("1", "true", "yes", "on"):
+        return 1
+    if v in ("2", "verbose"):
+        return 2
+    try:
+        return max(0, min(2, int(v, 0)))
+    except ValueError:
+        return 0
+
+
 def drain_hw_events() -> list[tuple[str, Any]]:
     """Непусто только из главного цикла NiceGUI (timer_loop)."""
     out: list[tuple[str, Any]] = []
@@ -111,6 +127,15 @@ def drain_hw_events() -> list[tuple[str, Any]]:
 
 def _enqueue_cash_uzs(amount: int) -> None:
     if amount > 0:
+        if hw_debug_level() >= 1:
+            try:
+                qsz = _HW_EVENTS.qsize()
+            except Exception:
+                qsz = -1
+            print(
+                f"[moyka-hw-debug] в очередь для UI: cash +{amount} UZS (очередь ~{qsz} до put)",
+                flush=True,
+            )
         _HW_EVENTS.put(("cash", int(amount)))
 
 
@@ -264,6 +289,8 @@ def _run_rpi_gpio() -> None:
             if now - last_pulse_t > BILL_DEBOUNCE_S:
                 pulse_count += 1
                 last_pulse_t = now
+                if hw_debug_level() >= 2:
+                    print(f"[moyka-hw-debug] импульс #{pulse_count} (RPi.GPIO)", flush=True)
 
     def on_int(_ch: Any) -> None:
         nonlocal last_pcf
@@ -420,6 +447,8 @@ def _run_gpiod() -> None:
             if now - last_pulse_t > BILL_DEBOUNCE_S:
                 pulse_count += 1
                 last_pulse_t = now
+                if hw_debug_level() >= 2:
+                    print(f"[moyka-hw-debug] импульс #{pulse_count} (gpiod)", flush=True)
 
     def int_hit() -> None:
         nonlocal last_pcf
@@ -606,6 +635,8 @@ def _run_periphery() -> None:
             if now - last_pulse_t > BILL_DEBOUNCE_S:
                 pulse_count += 1
                 last_pulse_t = now
+                if hw_debug_level() >= 2:
+                    print(f"[moyka-hw-debug] импульс #{pulse_count} (periphery)", flush=True)
 
     def int_hit() -> None:
         nonlocal last_pcf
@@ -704,6 +735,12 @@ def _run_periphery() -> None:
 
 def _run_mock() -> None:
     print("[moyka-hw] mock: импульсов нет (тест MOYKA_HW=1 без GPIO)", flush=True)
+    if hw_debug_level() >= 1:
+        print(
+            "[moyka-hw-debug] РЕЖИМ MOCK — купюры в main не придут. Проверьте: "
+            "MOYKA_GPIO_BACKEND=periphery, права gpio, не занята ли линия (bil.py выкл.).",
+            flush=True,
+        )
     while True:
         time.sleep(3600)
 
@@ -750,5 +787,11 @@ def start() -> None:
                     )
                     target = _run_mock
 
+    if hw_debug_level() >= 1:
+        print(
+            f"[moyka-hw-debug] поток GPIO стартовал: backend={getattr(target, '__name__', target)} "
+            f"(auto→первый доступный из rpi/gpiod/periphery)",
+            flush=True,
+        )
     th = threading.Thread(target=target, name="moyka-hw", daemon=True)
     th.start()

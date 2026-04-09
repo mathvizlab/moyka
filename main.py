@@ -501,6 +501,7 @@ update_ui_gc_ticks = [0]
 _ui_timer_last_paint_mono = [0.0]
 UI_TIMER_LOOP_REFRESH_MIN_S = 0.35
 BILLING_LOOP_DT_S = 0.1  # было 0.05: реже просыпания asyncio, секунды и revenue по-прежнему с bill_accumulator
+_hw_debug_heartbeat_mono = [0.0]  # для MOYKA_HW_DEBUG: раз в несколько секунд в консоль
 _last_ui_main_text = [None]
 _last_ui_main_unit = [None]
 _last_ui_sub_text = [None]
@@ -1052,9 +1053,11 @@ async def timer_loop():
     dt = BILLING_LOOP_DT_S
     idle_dt = 0.25
     while True:
-        had_hw = False
-        for kind, payload in kiosk_hardware.drain_hw_events():
-            had_hw = True
+        batch = kiosk_hardware.drain_hw_events()
+        had_hw = len(batch) > 0
+        for kind, payload in batch:
+            if kiosk_hardware.hw_debug_level() >= 1:
+                print(f"[moyka-hw-debug] UI←очередь: {kind!r} payload={payload!r}", flush=True)
             if kind == "cash":
                 apply_cash_topup(int(payload))
             elif kind == "btn":
@@ -1107,6 +1110,17 @@ async def timer_loop():
                 save_app_state()
         else:
             bill_accumulator[0] = 0.0
+
+        if kiosk_hardware.hw_enabled() and kiosk_hardware.hw_debug_level() >= 1:
+            tn = time.monotonic()
+            if tn - _hw_debug_heartbeat_mono[0] >= 8.0:
+                _hw_debug_heartbeat_mono[0] = tn
+                print(
+                    f"[moyka-hw-debug] heartbeat: внесено_за_сеанс={int(session_cash_inserted_uzs[0])} "
+                    f"остаток_под_тариф={int(acceptor_cash_balance_uzs[0])} "
+                    f"ui_client_ok={_ui_client_alive()}",
+                    flush=True,
+                )
 
         # Шапка (таймер + баланс купюр) — и на паузе, и без выбранного режима; иначе сумма «залипает» на 0.
         now_paint = time.monotonic()
@@ -2130,6 +2144,19 @@ def _app_startup() -> None:
             flush=True,
         )
     _apply_hw_env_match_bil_defaults()
+    if kiosk_hardware.hw_debug_level() >= 1:
+        print(
+            "[moyka-hw-debug] MOYKA_HW_DEBUG включён — в консоли ищите "
+            "[moyka-hw-debug] (очередь, heartbeat) и [moyka-hw] (железо). "
+            "Импульсы по одному: MOYKA_HW_DEBUG=2",
+            flush=True,
+        )
+        if not kiosk_hardware.hw_enabled():
+            print(
+                "[moyka-hw-debug] ВНИМАНИЕ: MOYKA_HW не 1 — купюроприёмник не слушается. "
+                "Запуск: MOYKA_HW=1 MOYKA_HW_DEBUG=1 ./run.sh",
+                flush=True,
+            )
     try:
         kiosk_hardware.start()
     except Exception as err:
