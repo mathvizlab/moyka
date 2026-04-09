@@ -2137,10 +2137,14 @@ def _apply_hw_env_match_bil_defaults() -> None:
 
 def _app_startup() -> None:
     if kiosk_hardware.hw_enabled():
-        print("[moyka] MOYKA_HW=1 — поток купюроприёмника/I2C стартует", flush=True)
+        print(
+            "[moyka] купюроприёмник: поток GPIO стартует (на Linux включён по умолчанию, как bil.py; "
+            "отключить: MOYKA_HW=0)",
+            flush=True,
+        )
     else:
         print(
-            "[moyka] купюры только при MOYKA_HW=1 (и GPIO на Radxa). Сейчас приём отключён.",
+            "[moyka] купюроприёмник выключен (MOYKA_HW=0 или не Linux). На Radxa обычно ничего не задавайте.",
             flush=True,
         )
     _apply_hw_env_match_bil_defaults()
@@ -2153,8 +2157,8 @@ def _app_startup() -> None:
         )
         if not kiosk_hardware.hw_enabled():
             print(
-                "[moyka-hw-debug] ВНИМАНИЕ: MOYKA_HW не 1 — купюроприёмник не слушается. "
-                "Запуск: MOYKA_HW=1 MOYKA_HW_DEBUG=1 ./run.sh",
+                "[moyka-hw-debug] Железо выкл. (MOYKA_HW=0 или не Linux). На Radxa: уберите MOYKA_HW=0, "
+                "MOYKA_HW_DEBUG=1 ./run.sh",
                 flush=True,
             )
     try:

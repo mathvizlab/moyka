@@ -6,11 +6,11 @@
   • MOYKA_GPIO_BACKEND=gpiod — libgpiod 1.x (как ваш рабочий скрипт, см. MOYKA_PRESET=radxa_zero_gpiod)
   • periphery — /dev/gpiochip* + опрос линии (MOYKA_PRESET=radxa_zero)
 
-Включение: MOYKA_HW=1
+  MOYKA_HW — на Linux по умолчанию приём купюр ВКЛЮЧЁН (как отдельный bil.py). Явно отключить: MOYKA_HW=0
   MOYKA_HW_DEBUG=1 или 2 — подробный лог в консоль (очередь, импульсы)
 
 Переменные окружения (основные):
-  MOYKA_HW=1
+  MOYKA_HW=1|0   # 0 = выкл.; пусто на Linux = вкл.
   MOYKA_GPIO_BACKEND=auto|rpigpio|gpiod|periphery|mock
       auto: RPi.GPIO → иначе gpiod → иначе periphery
   MOYKA_BILL_UZS_PER_PULSE=1000
@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import os
 import queue
+import sys
 import shutil
 import subprocess
 import threading
@@ -95,7 +96,16 @@ except ValueError:
 
 
 def hw_enabled() -> bool:
-    v = os.environ.get("MOYKA_HW", "").strip().lower()
+    """
+    На Linux по умолчанию True — поведение как у bil.py (GPIO без отдельного флага).
+    Отключить на киоске: MOYKA_HW=0. На macOS/Windows по умолчанию False (мок).
+    """
+    raw = os.environ.get("MOYKA_HW", "").strip()
+    if not raw:
+        return sys.platform.startswith("linux")
+    v = raw.lower()
+    if v in ("0", "false", "no", "off"):
+        return False
     return v in ("1", "true", "yes", "on")
 
 
@@ -734,7 +744,7 @@ def _run_periphery() -> None:
 
 
 def _run_mock() -> None:
-    print("[moyka-hw] mock: импульсов нет (тест MOYKA_HW=1 без GPIO)", flush=True)
+    print("[moyka-hw] mock: импульсов нет (линия GPIO не открылась или нет драйвера)", flush=True)
     if hw_debug_level() >= 1:
         print(
             "[moyka-hw-debug] РЕЖИМ MOCK — купюры в main не придут. Проверьте: "
@@ -750,7 +760,7 @@ def start() -> None:
     if _threads_started:
         return
     if not hw_enabled():
-        print("[moyka-hw] выкл. Включите MOYKA_HW=1 на Radxa/Pi", flush=True)
+        print("[moyka-hw] выкл. (MOYKA_HW=0 или не Linux). На Radxa уберите MOYKA_HW=0 из окружения.", flush=True)
         return
     _apply_hw_presets()
     _threads_started = True
