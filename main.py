@@ -1322,6 +1322,9 @@ def apply_cash_topup(amount_uzs: int) -> None:
         f"внесено за сеанс: {int(session_cash_inserted_uzs[0] + 0.5)}",
         flush=True,
     )
+    # Обновить подписи TIME/UZS в шапке даже если display_mode меняет, какая строка «главная».
+    _last_ui_main_text[0] = None
+    _last_ui_sub_text[0] = None
 
     bid = active_btn_id[0]
     if not bid or bid not in service_config:

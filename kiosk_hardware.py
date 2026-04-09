@@ -12,7 +12,7 @@
 Переменные окружения (основные):
   MOYKA_HW=1|0   # 0 = выкл.; пусто на Linux = вкл.
   MOYKA_GPIO_BACKEND=auto|rpigpio|gpiod|periphery|mock
-      auto: RPi.GPIO → иначе gpiod → иначе periphery
+      auto: RPi.GPIO → periphery (как bil.py) → gpiod
   MOYKA_BILL_UZS_PER_PULSE=1000
   MOYKA_BILL_DEBOUNCE_S=0.03   # как в RPi: импульсы чаще 30 мс не считаем
   MOYKA_BILL_IDLE_S=0.8       # тишина после последнего импульса — конец купюры
@@ -548,7 +548,8 @@ def _run_periphery() -> None:
 
     bill_name = os.environ.get("MOYKA_GPIO_BILL_NAME", "").strip()
     int_name = os.environ.get("MOYKA_GPIO_INT_NAME", "").strip()
-    default_chip = os.environ.get("MOYKA_GPIOCHIP", "/dev/gpiochip0")
+    # Как bil.py: без env — gpiochip1 (типичный pin 40 на Radxa Zero), не gpiochip0.
+    default_chip = os.environ.get("MOYKA_GPIOCHIP", "/dev/gpiochip1")
 
     bill_chip = default_chip
     bill_line_no: int | None = None
@@ -776,23 +777,26 @@ def start() -> None:
     elif backend == "periphery":
         target = _run_periphery
     else:
+        # auto: сначала RPi; затем periphery (тот же стек, что bil.py), потом gpiod.
+        # Раньше шёл gpiod раньше periphery — на Radxa с python3-libgpiod купюры шли через
+        # event_wait и часто не совпадали с опросом как в bil.py.
         try:
             import RPi.GPIO  # type: ignore  # noqa: F401
 
             target = _run_rpi_gpio
         except Exception:
             try:
-                import gpiod  # type: ignore  # noqa: F401
+                import periphery  # type: ignore  # noqa: F401
 
-                target = _run_gpiod
+                target = _run_periphery
             except Exception:
                 try:
-                    import periphery  # type: ignore  # noqa: F401
+                    import gpiod  # type: ignore  # noqa: F401
 
-                    target = _run_periphery
+                    target = _run_gpiod
                 except Exception:
                     print(
-                        "[moyka-hw] нет RPi.GPIO, gpiod и periphery — режим mock",
+                        "[moyka-hw] нет RPi.GPIO, periphery и gpiod — режим mock",
                         flush=True,
                     )
                     target = _run_mock
@@ -800,7 +804,7 @@ def start() -> None:
     if hw_debug_level() >= 1:
         print(
             f"[moyka-hw-debug] поток GPIO стартовал: backend={getattr(target, '__name__', target)} "
-            f"(auto→первый доступный из rpi/gpiod/periphery)",
+            f"(auto: rpi → periphery как bil.py → gpiod)",
             flush=True,
         )
     th = threading.Thread(target=target, name="moyka-hw", daemon=True)
