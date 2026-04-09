@@ -96,6 +96,25 @@ def _client_deleted() -> bool:
     return bool(getattr(c, "_deleted", False))
 
 
+# Клиент страницы /: в фоновом timer_loop после await context.client часто бросает RuntimeError,
+# и весь update_ui() молча выходил — баланс купюр в памяти рос, под временем оставалось «0».
+_main_ui_client_ref: list[Any] = [None]
+
+
+def _ui_client_alive() -> bool:
+    """Есть ли живой браузерный клиент для отрисовки шапки (время + UZS под ним)."""
+    try:
+        c = context.client
+        if c is not None and not getattr(c, "_deleted", False):
+            return True
+    except RuntimeError:
+        pass
+    r = _main_ui_client_ref[0]
+    if r is None:
+        return False
+    return not bool(getattr(r, "_deleted", False))
+
+
 def _client_ok() -> bool:
     """Клиент ещё на странице (без жёсткой проверки сокета — иначе JS для видео мог не уходить)."""
     return not _client_deleted()
@@ -984,7 +1003,7 @@ def update_price_bar():
 def update_ui():
     if 'main_display' not in globals():
         return
-    if _client_deleted():
+    if not _ui_client_alive():
         return
     update_ui_gc_ticks[0] += 1
     if update_ui_gc_ticks[0] >= 100:
@@ -1041,10 +1060,10 @@ async def timer_loop():
                     handle_click(str(payload))
                 except Exception as err:
                     print(f"[moyka] PCF→кнопка: {err}", flush=True)
-        if had_hw and not _client_deleted():
-            # Дублируем обновление экрана: события из потока kiosk_hardware (как bil.py → сумма на UI).
+        if had_hw:
+            # Сразу после купюр — обновить сумму под временем (не полагаемся на context.client в таймере).
             update_ui()
-        if _client_deleted():
+        if not _ui_client_alive():
             await asyncio.sleep(idle_dt)
             continue
         now = time.monotonic()
@@ -1087,11 +1106,11 @@ async def timer_loop():
         else:
             bill_accumulator[0] = 0.0
 
-        if active_btn_id[0] and (remaining_seconds[0] > 0 or not is_paused[0]):
-            now_paint = time.monotonic()
-            if now_paint - _ui_timer_last_paint_mono[0] >= UI_TIMER_LOOP_REFRESH_MIN_S:
-                _ui_timer_last_paint_mono[0] = now_paint
-                update_ui()
+        # Шапка (таймер + баланс купюр) — и на паузе, и без выбранного режима; иначе сумма «залипает» на 0.
+        now_paint = time.monotonic()
+        if now_paint - _ui_timer_last_paint_mono[0] >= UI_TIMER_LOOP_REFRESH_MIN_S:
+            _ui_timer_last_paint_mono[0] = now_paint
+            update_ui()
         await asyncio.sleep(dt)
 
 def stop_everything():
@@ -1453,6 +1472,10 @@ async def load_app_state():
 @ui.page('/')
 async def main_page():
     global main_display, main_unit, sub_display, sub_currency
+    try:
+        _main_ui_client_ref[0] = context.client
+    except RuntimeError:
+        _main_ui_client_ref[0] = None
     btns.clear()
     pause_refs.clear()
     # Словарь вкладок только для этого клиента; глобальный dict ломал меню при двух вкладках / переподключении.
